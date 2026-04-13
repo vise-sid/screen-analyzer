@@ -66,6 +66,7 @@ function addAction(action) {
     switch_tab: "\u{1F500}",
     close_tab: "\u274C",
     click_captcha: "\u{1F916}",
+    stealth_solve: "\u{1F510}",
     dismiss_popup: "\u{1F6AB}",
     accept_dialog: "\u2705",
     dismiss_dialog: "\u274C",
@@ -140,6 +141,8 @@ function formatAction(action) {
       return `Close tab ${action.tabId}`;
     case "click_captcha":
       return `Click CAPTCHA checkbox`;
+    case "stealth_solve":
+      return `Stealth solve Cloudflare${action.url ? ": " + action.url : ""}`;
     case "dismiss_popup":
       return `Force-dismiss popup`;
     case "accept_dialog":
@@ -418,8 +421,40 @@ async function runAgent(task) {
       if (result.action.type === "ask_user") {
         const question = result.action.question || "Please help with the current page.";
         await pauseForUser(question);
-        if (!running) break; // user stopped instead of resuming
-        continue; // re-capture state and continue loop
+        if (!running) break;
+        continue;
+      }
+
+      // Handle stealth_solve — escalate to nodriver for Cloudflare bypass
+      if (result.action.type === "stealth_solve") {
+        const solveUrl = result.action.url || state.screenshot.url || "";
+        addLog(
+          `<div class="thought-label">Stealth Solve</div>` +
+          `<div>Launching stealth browser to bypass Cloudflare on ${escapeHtml(solveUrl)}...</div>`,
+          "log-thought"
+        );
+
+        // Get current tab URL if not provided
+        let targetUrl = solveUrl;
+        if (!targetUrl) {
+          const tab = await chrome.tabs.get(state.screenshot.tabId);
+          targetUrl = tab.url;
+        }
+
+        const solveResult = await stealthSolve(state.screenshot.tabId, targetUrl, API_BASE);
+
+        if (solveResult.success) {
+          addLog(
+            `<span class="action-icon">\u{1F510}</span> <span>Cloudflare bypassed! Injected ${solveResult.cookiesInjected} cookies (cf_clearance: ${solveResult.cf_clearance ? "yes" : "no"}). Page reloaded.</span>`,
+            "log-action"
+          );
+          // Detach debugger since the page reloaded
+          await detachDebugger();
+          await sleep(2000);
+        } else {
+          addError(`Stealth solve failed: ${solveResult.error}`);
+        }
+        continue;
       }
 
       // Execute tab actions vs page actions

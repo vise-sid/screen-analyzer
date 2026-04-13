@@ -3,7 +3,7 @@
   "name": "Screen Analyzer",
   "version": "1.0.0",
   "description": "Capture your screen and get AI-powered analysis via Gemini",
-  "permissions": ["activeTab", "sidePanel", "tabs", "tabGroups", "debugger"],
+  "permissions": ["activeTab", "sidePanel", "tabs", "tabGroups", "debugger", "cookies"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

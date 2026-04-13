@@ -72,8 +72,9 @@ All four fields are REQUIRED every step.
 - switch_tab: {"type": "switch_tab", "tabId": 12345}
 - close_tab: {"type": "close_tab", "tabId": 12345}
 
-### CAPTCHAs
-- click_captcha: {"type": "click_captcha"} — Finds the CAPTCHA iframe's CURRENT position and clicks the checkbox with human-like mouse movement (random jitter, curved path). Use this for Turnstile/reCAPTCHA/hCaptcha "I'm not a robot" checkboxes. Handles position shifts.
+### CAPTCHAs & Anti-Bot
+- click_captcha: {"type": "click_captcha"} — Finds the CAPTCHA iframe's CURRENT position and clicks the checkbox with human-like mouse movement. Use for Turnstile/reCAPTCHA/hCaptcha checkboxes.
+- stealth_solve: {"type": "stealth_solve", "url": "https://..."} — ESCALATION: Launches a stealth browser (undetectable by Cloudflare) that inherits the user's cookies, solves the challenge, and transfers the clearance cookie back. The page auto-reloads after. Use this when click_captcha fails 2+ times on Cloudflare/Turnstile.
 
 ### Popups & Dialogs
 - dismiss_popup: {"type": "dismiss_popup"} — Aggressively tries to close any popup/modal/overlay using multiple JS strategies (click close buttons, hide overlays, remove backdrops). Use this when clicking the X button or Escape doesn't work.
@@ -93,12 +94,12 @@ All four fields are REQUIRED every step.
    c. Try pressing Escape
    d. Look for "No", "Later", "Cancel", "Skip", "Close", "X" buttons in the screenshot and click them
    Do NOT spend more than 3 steps trying to close a popup — use dismiss_popup which is the most aggressive approach.
-2. **CAPTCHA SOLVING.** If you see a CAPTCHA, TRY to solve it:
-   - For Cloudflare Turnstile / reCAPTCHA / hCaptcha checkboxes: Use the click_captcha action — it finds the iframe's CURRENT position and clicks with human-like mouse movement. The checkbox moves between attempts, so always use click_captcha instead of regular click.
-   - For text CAPTCHAs: Read the distorted text from the screenshot and type it.
-   - For image selection CAPTCHAs (select all with X): Try your best using vision.
-   - Track your attempts. If you've failed 3 times, use ask_user: {"type": "ask_user", "question": "Please solve the CAPTCHA on the page, then I'll continue."}
-   - Do NOT give up on the first failure — CAPTCHAs often have a refresh/retry button.
+2. **CAPTCHA SOLVING — 3-tier escalation:**
+   - **Tier 1 — click_captcha** (try 2 times): Use for Turnstile/reCAPTCHA/hCaptcha checkboxes. It finds the iframe position and clicks with human-like movement.
+   - **Tier 2 — stealth_solve** (try once): If click_captcha fails twice, escalate to stealth_solve. This launches a separate stealth browser that Cloudflare can't detect, solves the challenge, and transfers the clearance cookie back. The page reloads automatically.
+   - **Tier 3 — ask_user** (last resort): If stealth_solve also fails, ask the user to solve it manually.
+   - For text CAPTCHAs: Read the distorted text from the screenshot and type it. If wrong 3 times, ask_user.
+   - For image CAPTCHAs: Try your best with vision. If wrong 3 times, ask_user.
 3. **EVALUATE before acting.** In the "eval" field, honestly assess whether your previous action worked by comparing the current screenshot to what you expected. If it failed, diagnose why and try a different approach.
 
 ### Element Targeting
@@ -498,6 +499,10 @@ def _guess_action_from_raw(raw: str) -> dict | None:
     elif action_type == "click_captcha":
         return {"type": "click_captcha"}
 
+    elif action_type == "stealth_solve":
+        url_match = re.search(r'"url"\s*:\s*"([^"]*)"', raw)
+        return {"type": "stealth_solve", "url": url_match.group(1) if url_match else ""}
+
     elif action_type == "dismiss_popup":
         return {"type": "dismiss_popup"}
 
@@ -632,3 +637,35 @@ async def step_session(session_id: str, req: StepRequest):
 async def delete_session(session_id: str):
     sessions.pop(session_id, None)
     return {"status": "ok"}
+
+
+# ── Stealth Cloudflare Solver ────────────────────────────────
+
+class StealthSolveRequest(BaseModel):
+    url: str
+    user_agent: str | None = None
+    cookies: list[dict] | None = None
+    timeout: int = 30
+
+
+@app.post("/stealth-solve")
+async def stealth_solve(req: StealthSolveRequest):
+    """
+    Spawn a stealth browser (nodriver) to solve Cloudflare/Turnstile challenges.
+    Accepts the user's cookies, injects them, navigates to the URL,
+    waits for the challenge to auto-resolve, and returns all cookies
+    (including cf_clearance) for injection back into the user's browser.
+    """
+    import asyncio
+    from stealth_solver import solve_cloudflare
+
+    try:
+        result = await solve_cloudflare(
+            url=req.url,
+            user_agent=req.user_agent,
+            cookies=req.cookies,
+            timeout=req.timeout,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
