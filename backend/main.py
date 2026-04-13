@@ -95,11 +95,15 @@ All four fields are REQUIRED every step.
    c. Try pressing Escape
    d. Look for "No", "Later", "Cancel", "Skip", "Close", "X" buttons in the screenshot and click them
    Do NOT spend more than 3 steps trying to close a popup — use dismiss_popup which is the most aggressive approach.
-2. **CAPTCHA SOLVING — 4-tier escalation:**
-   - **Tier 1 — click_captcha** (try once): Quick attempt with human-like mouse movement.
-   - **Tier 2 — clean_captcha_solve** (try 2 times): BEST for Cloudflare. Detaches debugger so the browser is genuinely clean, waits 2s, then does an atomic find→click→detach. Cloudflare sees a real browser. This handles moving checkboxes because find+click is <100ms.
-   - **Tier 3 — stealth_solve** (try once): Launches a separate stealth browser as last automated attempt.
-   - **Tier 4 — ask_user**: If everything fails, ask the user.
+2. **CAPTCHA SOLVING:**
+   - **For Cloudflare Turnstile** (when you see "cloudflare_page": true in CAPTCHA data): Go DIRECTLY to clean_captcha_solve. Do NOT use click_captcha first — it attaches the debugger which taints the session.
+     1. clean_captcha_solve (try 2 times) — detaches debugger, browser is genuinely clean, atomic find→click→detach in 100ms
+     2. stealth_solve (try once) — launches separate stealth browser
+     3. ask_user — last resort
+   - **For other CAPTCHAs** (text, image, reCAPTCHA on non-Cloudflare pages):
+     1. click_captcha or solve by reading text from screenshot
+     2. clean_captcha_solve if click_captcha fails
+     3. ask_user after 3 total failures
    - For text CAPTCHAs: Read the distorted text from the screenshot and type it. If wrong 3 times, ask_user.
    - For image CAPTCHAs: Try your best with vision. If wrong 3 times, ask_user.
 3. **EVALUATE before acting.** In the "eval" field, honestly assess whether your previous action worked by comparing the current screenshot to what you expected. If it failed, diagnose why and try a different approach.
@@ -299,8 +303,18 @@ def _format_popup(popup: dict | None) -> str:
 def _format_captcha(captcha: dict | None) -> str:
     if not captcha:
         return ""
-    rect = captcha.get("rect", {})
+
     ctype = captcha.get("type", "unknown")
+    is_cf_page = captcha.get("cloudflare_page", False)
+
+    if is_cf_page:
+        return (
+            f"\n⚠ CLOUDFLARE CHALLENGE PAGE DETECTED:\n"
+            f"  The debugger has NOT been attached (browser is clean).\n"
+            f"  -> Use clean_captcha_solve IMMEDIATELY. Do NOT use click_captcha — it would taint the session."
+        )
+
+    rect = captcha.get("rect", {})
     lines = [
         f"\n⚠ CAPTCHA DETECTED ({ctype}):",
         f"  Position: ({rect.get('x', 0)},{rect.get('y', 0)} "
@@ -313,7 +327,7 @@ def _format_captcha(captcha: dict | None) -> str:
         )
     if "turnstile" in ctype.lower() or "recaptcha" in ctype.lower() or "hcaptcha" in ctype.lower():
         lines.append(
-            "  -> Use click_captcha action — it finds the current position and clicks with human-like movement."
+            "  -> Use clean_captcha_solve for best results, or click_captcha as quick attempt."
         )
     else:
         lines.append(

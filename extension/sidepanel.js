@@ -276,29 +276,65 @@ async function captureScreenshot() {
   };
 }
 
+/**
+ * Detect if the current page is a Cloudflare challenge without attaching debugger.
+ * Uses chrome.scripting.executeScript (no debugger needed).
+ */
+async function isCloudflareChallenge(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const body = document.body?.innerText || "";
+        const hasChallenge =
+          body.includes("Verify you are human") ||
+          body.includes("Checking your browser") ||
+          body.includes("Just a moment") ||
+          document.querySelector('iframe[src*="challenges.cloudflare.com"]') !== null ||
+          document.querySelector('.cf-turnstile') !== null ||
+          document.querySelector('iframe[src*="turnstile"]') !== null;
+        return hasChallenge;
+      },
+    });
+    return results?.[0]?.result || false;
+  } catch {
+    return false;
+  }
+}
+
 async function captureState() {
   const screenshot = await captureScreenshot();
+
+  // Check if this is a Cloudflare challenge page BEFORE attaching debugger
+  const isCloudflare = await isCloudflareChallenge(screenshot.tabId);
 
   let elements = null;
   let scrollContainers = null;
   let popup = null;
   let captcha = null;
   let isCanvasHeavy = false;
-  try {
-    const data = await extractElements(screenshot.tabId);
-    elements = data.elements;
-    scrollContainers = data.scrollContainers;
-    popup = data.popup;
-    captcha = data.captcha;
-    isCanvasHeavy = data.isCanvasHeavy;
-  } catch (err) {
-    console.warn("Element extraction failed, using vision-only mode:", err);
+
+  if (isCloudflare) {
+    // DON'T attach debugger on Cloudflare pages — it taints the session
+    captcha = { type: "Cloudflare Turnstile", cloudflare_page: true };
+  } else {
+    // Normal page — full element extraction via debugger
+    try {
+      const data = await extractElements(screenshot.tabId);
+      elements = data.elements;
+      scrollContainers = data.scrollContainers;
+      popup = data.popup;
+      captcha = data.captcha;
+      isCanvasHeavy = data.isCanvasHeavy;
+    } catch (err) {
+      console.warn("Element extraction failed, using vision-only mode:", err);
+    }
   }
 
   const agentTabs = await getAgentTabs();
-  const dialog = getPendingDialog();
+  const dialog = typeof getPendingDialog === "function" ? getPendingDialog() : null;
 
-  return { screenshot, elements, scrollContainers, popup, captcha, dialog, isCanvasHeavy, agentTabs };
+  return { screenshot, elements, scrollContainers, popup, captcha, dialog, isCanvasHeavy, agentTabs, isCloudflare };
 }
 
 // ── Tab Action Executor ─────────────────────────────────────
