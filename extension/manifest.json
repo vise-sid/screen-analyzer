@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Screen Analyzer",
+  "version": "1.0.0",
+  "description": "Capture your screen and get AI-powered analysis via Gemini",
+  "permissions": ["activeTab", "sidePanel", "tabs", "tabGroups", "debugger"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open Screen Analyzer"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
