@@ -1,13 +1,8 @@
 /**
  * Cookie Manager
- * Extracts cookies from the user's Chrome for a given URL,
- * and injects cookies back after stealth solving.
+ * Extracts cookies from Chrome for a URL, injects cookies back after stealth solving.
  */
 
-/**
- * Get all cookies for a URL from Chrome.
- * Returns array of { name, value, domain, path, secure, httpOnly, sameSite }.
- */
 async function extractCookies(url) {
   const cookies = await chrome.cookies.getAll({ url });
   return cookies.map((c) => ({
@@ -22,16 +17,12 @@ async function extractCookies(url) {
   }));
 }
 
-/**
- * Inject cookies into Chrome.
- * Used after stealth solver returns new cookies (e.g., cf_clearance).
- */
 async function injectCookies(cookies, baseUrl) {
   let injected = 0;
+  const errors = [];
 
   for (const c of cookies) {
     try {
-      // Build the cookie URL from domain
       const domain = c.domain || "";
       const cleanDomain = domain.startsWith(".") ? domain.slice(1) : domain;
       const protocol = c.secure ? "https" : "http";
@@ -46,26 +37,45 @@ async function injectCookies(cookies, baseUrl) {
         httpOnly: c.httpOnly || false,
       };
 
-      // Domain: only set if it starts with "." (cross-subdomain)
+      // Domain
       if (c.domain && c.domain.startsWith(".")) {
         cookieDetails.domain = c.domain;
       }
 
-      // sameSite
-      if (c.sameSite && c.sameSite !== "unspecified") {
-        cookieDetails.sameSite = c.sameSite;
+      // sameSite — Chrome extension API expects lowercase
+      const sameSite = (c.sameSite || "").toLowerCase();
+      if (sameSite === "none" || sameSite === "no_restriction") {
+        cookieDetails.sameSite = "no_restriction";
+        // sameSite=None requires secure=true
+        cookieDetails.secure = true;
+      } else if (sameSite === "lax") {
+        cookieDetails.sameSite = "lax";
+      } else if (sameSite === "strict") {
+        cookieDetails.sameSite = "strict";
       }
+      // "unspecified" or empty → don't set sameSite (Chrome defaults to Lax)
 
       // Expiration
       if (c.expirationDate) {
         cookieDetails.expirationDate = c.expirationDate;
       }
 
-      await chrome.cookies.set(cookieDetails);
-      injected++;
+      const result = await chrome.cookies.set(cookieDetails);
+      if (result) {
+        injected++;
+        if (c.name === "cf_clearance") {
+          console.log(`Injected cf_clearance cookie for ${url}`);
+        }
+      } else {
+        errors.push(`${c.name}: chrome.cookies.set returned null`);
+      }
     } catch (e) {
-      console.warn(`Failed to inject cookie ${c.name}:`, e);
+      errors.push(`${c.name}: ${e.message}`);
     }
+  }
+
+  if (errors.length > 0) {
+    console.warn(`Cookie injection errors (${errors.length}):`, errors.slice(0, 5));
   }
 
   return injected;
@@ -73,29 +83,33 @@ async function injectCookies(cookies, baseUrl) {
 
 /**
  * Full stealth solve flow:
- * 1. Extract cookies from Chrome for the URL
+ * 1. Extract cookies from Chrome
  * 2. Send to backend /stealth-solve
- * 3. Get back solved cookies (with cf_clearance)
- * 4. Inject them into Chrome
- * 5. Reload the tab
- *
- * Returns { success, cf_clearance, cookiesInjected, error }
+ * 3. Get solved cookies back (with cf_clearance)
+ * 4. Inject into Chrome
+ * 5. Reload tab
  */
 async function stealthSolve(tabId, url, apiBase) {
   try {
-    // 1. Get the user agent to match
-    const tab = await chrome.tabs.get(tabId);
-    const uaResult = await chrome.debugger.sendCommand(
-      { tabId },
-      "Runtime.evaluate",
-      { expression: "navigator.userAgent", returnByValue: true }
-    ).catch(() => null);
-    const userAgent = uaResult?.result?.value || null;
+    // Get user agent
+    let userAgent = null;
+    try {
+      await attachDebugger(tabId);
+      const uaResult = await sendCommand("Runtime.evaluate", {
+        expression: "navigator.userAgent",
+        returnByValue: true,
+      });
+      userAgent = uaResult?.result?.value || null;
+      await detachDebugger();
+    } catch (e) {
+      console.warn("Could not get user agent:", e);
+    }
 
-    // 2. Extract current cookies for this URL
+    // Extract current cookies
     const currentCookies = await extractCookies(url);
+    console.log(`Extracted ${currentCookies.length} cookies for ${url}`);
 
-    // 3. Call backend stealth solver
+    // Call backend
     const response = await fetch(`${apiBase}/stealth-solve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -103,7 +117,7 @@ async function stealthSolve(tabId, url, apiBase) {
         url,
         user_agent: userAgent,
         cookies: currentCookies,
-        timeout: 30,
+        timeout: 45,
       }),
     });
 
@@ -118,22 +132,23 @@ async function stealthSolve(tabId, url, apiBase) {
     }
 
     const result = await response.json();
+    console.log(`Stealth solve result: success=${result.success}, cookies=${result.cookies?.length}, cf_clearance=${!!result.cf_clearance}`);
 
-    if (!result.success) {
+    if (!result.success || !result.cookies || result.cookies.length === 0) {
       return {
         success: false,
-        cf_clearance: null,
+        cf_clearance: result.cf_clearance,
         cookiesInjected: 0,
-        error: result.error || "Stealth solver failed",
+        error: result.error || "No cookies returned from stealth solver",
       };
     }
 
-    // 4. Inject the solved cookies back into Chrome
+    // Inject cookies
     const injected = await injectCookies(result.cookies, url);
+    console.log(`Injected ${injected}/${result.cookies.length} cookies`);
 
-    // 5. Reload the tab to apply the new cookies
+    // Reload the tab
     await chrome.tabs.reload(tabId);
-    // Wait for page to load
     await new Promise((resolve) => {
       const listener = (updatedTabId, changeInfo) => {
         if (updatedTabId === tabId && changeInfo.status === "complete") {
@@ -149,7 +164,7 @@ async function stealthSolve(tabId, url, apiBase) {
     });
 
     return {
-      success: true,
+      success: !!result.cf_clearance,
       cf_clearance: result.cf_clearance,
       cookiesInjected: injected,
       error: null,

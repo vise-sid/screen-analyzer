@@ -452,15 +452,15 @@ async function runAgent(task) {
 
         const solveResult = await stealthSolve(state.screenshot.tabId, targetUrl, API_BASE);
 
-        if (solveResult.success && solveResult.cf_clearance) {
+        if (solveResult.success) {
           addLog(
-            `<span class="action-icon">\u{1F510}</span> <span>Cloudflare bypassed! Injected ${solveResult.cookiesInjected} cookies. Page reloaded.</span>`,
+            `<span class="action-icon">\u{1F510}</span> <span>Cloudflare bypassed! cf_clearance: ${solveResult.cf_clearance ? "yes" : "no"}, ${solveResult.cookiesInjected} cookies injected. Page reloaded.</span>`,
             "log-action"
           );
           await detachDebugger();
           await sleep(2000);
         } else {
-          addError(`Stealth solve failed: ${solveResult.error}`);
+          addError(`Stealth solve failed: ${solveResult.error || "Unknown error"}`);
         }
         continue;
       }
