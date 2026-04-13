@@ -73,8 +73,9 @@ All four fields are REQUIRED every step.
 - close_tab: {"type": "close_tab", "tabId": 12345}
 
 ### CAPTCHAs & Anti-Bot
-- click_captcha: {"type": "click_captcha"} — Finds the CAPTCHA iframe's CURRENT position and clicks the checkbox with human-like mouse movement. Use for Turnstile/reCAPTCHA/hCaptcha checkboxes.
-- stealth_solve: {"type": "stealth_solve", "url": "https://..."} — ESCALATION: Launches a stealth browser (undetectable by Cloudflare) that inherits the user's cookies, solves the challenge, and transfers the clearance cookie back. The page auto-reloads after. Use this when click_captcha fails 2+ times on Cloudflare/Turnstile.
+- click_captcha: {"type": "click_captcha"} — Clicks the CAPTCHA checkbox with human-like mouse movement. Tier 1.
+- clean_captcha_solve: {"type": "clean_captcha_solve"} — BEST OPTION for Cloudflare Turnstile. Detaches the debugger (browser becomes genuinely clean), waits for Cloudflare to see a real browser, then does an atomic find→click→detach in 100ms. The checkbox can't move in that window. Use after click_captcha fails.
+- stealth_solve: {"type": "stealth_solve", "url": "https://..."} — LAST RESORT: Launches a separate stealth browser. Use only if clean_captcha_solve also fails.
 
 ### Popups & Dialogs
 - dismiss_popup: {"type": "dismiss_popup"} — Aggressively tries to close any popup/modal/overlay using multiple JS strategies (click close buttons, hide overlays, remove backdrops). Use this when clicking the X button or Escape doesn't work.
@@ -94,10 +95,11 @@ All four fields are REQUIRED every step.
    c. Try pressing Escape
    d. Look for "No", "Later", "Cancel", "Skip", "Close", "X" buttons in the screenshot and click them
    Do NOT spend more than 3 steps trying to close a popup — use dismiss_popup which is the most aggressive approach.
-2. **CAPTCHA SOLVING — 3-tier escalation:**
-   - **Tier 1 — click_captcha** (try 2 times): Use for Turnstile/reCAPTCHA/hCaptcha checkboxes. It finds the iframe position and clicks with human-like movement.
-   - **Tier 2 — stealth_solve** (try once): If click_captcha fails twice, escalate to stealth_solve. This launches a separate stealth browser that Cloudflare can't detect, solves the challenge, and transfers the clearance cookie back. The page reloads automatically.
-   - **Tier 3 — ask_user** (last resort): If stealth_solve also fails, ask the user to solve it manually.
+2. **CAPTCHA SOLVING — 4-tier escalation:**
+   - **Tier 1 — click_captcha** (try once): Quick attempt with human-like mouse movement.
+   - **Tier 2 — clean_captcha_solve** (try 2 times): BEST for Cloudflare. Detaches debugger so the browser is genuinely clean, waits 2s, then does an atomic find→click→detach. Cloudflare sees a real browser. This handles moving checkboxes because find+click is <100ms.
+   - **Tier 3 — stealth_solve** (try once): Launches a separate stealth browser as last automated attempt.
+   - **Tier 4 — ask_user**: If everything fails, ask the user.
    - For text CAPTCHAs: Read the distorted text from the screenshot and type it. If wrong 3 times, ask_user.
    - For image CAPTCHAs: Try your best with vision. If wrong 3 times, ask_user.
 3. **EVALUATE before acting.** In the "eval" field, honestly assess whether your previous action worked by comparing the current screenshot to what you expected. If it failed, diagnose why and try a different approach.
@@ -498,6 +500,9 @@ def _guess_action_from_raw(raw: str) -> dict | None:
 
     elif action_type == "click_captcha":
         return {"type": "click_captcha"}
+
+    elif action_type == "clean_captcha_solve":
+        return {"type": "clean_captcha_solve"}
 
     elif action_type == "stealth_solve":
         url_match = re.search(r'"url"\s*:\s*"([^"]*)"', raw)

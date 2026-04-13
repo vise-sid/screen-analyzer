@@ -66,6 +66,7 @@ function addAction(action) {
     switch_tab: "\u{1F500}",
     close_tab: "\u274C",
     click_captcha: "\u{1F916}",
+    clean_captcha_solve: "\u{1F9F9}",
     stealth_solve: "\u{1F510}",
     dismiss_popup: "\u{1F6AB}",
     accept_dialog: "\u2705",
@@ -141,6 +142,8 @@ function formatAction(action) {
       return `Close tab ${action.tabId}`;
     case "click_captcha":
       return `Click CAPTCHA checkbox`;
+    case "clean_captcha_solve":
+      return `Clean solve (detach → click → detach)`;
     case "stealth_solve":
       return `Stealth solve Cloudflare${action.url ? ": " + action.url : ""}`;
     case "dismiss_popup":

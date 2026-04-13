@@ -810,6 +810,108 @@ async function cdpClickCaptcha() {
 }
 
 /**
+ * CLEAN CAPTCHA SOLVE — the nuclear option.
+ * Detaches debugger (browser becomes genuinely clean), waits for Cloudflare
+ * to see a real browser, then does an atomic reattach→find→click→detach
+ * in ~100ms so the checkbox can't move between detection and click.
+ *
+ * Flow:
+ * 1. Detach debugger → navigator.webdriver=false, debug bar gone
+ * 2. Wait 2s → Cloudflare's background checks see a real browser
+ * 3. Reattach → Runtime.evaluate to find iframe position → CDP click → detach
+ * 4. Wait for verification
+ */
+async function cdpCleanCaptchaSolve(tabId) {
+  try {
+    // Step 1: Detach debugger — browser is now genuinely clean
+    await detachDebugger();
+
+    // Step 2: Wait for Cloudflare to see the clean state
+    await sleep(2000);
+
+    // Step 3: Atomic reattach → find → click → detach (~100ms total)
+    await chrome.debugger.attach({ tabId }, "1.3");
+    attachedTabId = tabId;
+
+    // Find the CAPTCHA iframe position RIGHT NOW
+    const findResult = await sendCommand("Runtime.evaluate", {
+      expression: `
+        (() => {
+          // Turnstile
+          let f = document.querySelector(
+            'iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], .cf-turnstile iframe'
+          );
+          if (f) {
+            const r = f.getBoundingClientRect();
+            if (r.width > 10 && r.height > 10)
+              return JSON.stringify({ x: r.x + 30, y: r.y + r.height / 2, type: 'turnstile' });
+          }
+          // reCAPTCHA
+          f = document.querySelector('iframe[src*="recaptcha/api2/anchor"]');
+          if (f) {
+            const r = f.getBoundingClientRect();
+            if (r.width > 10 && r.height > 10)
+              return JSON.stringify({ x: r.x + 28, y: r.y + r.height / 2, type: 'recaptcha' });
+          }
+          // hCaptcha
+          f = document.querySelector('iframe[src*="hcaptcha.com"]');
+          if (f) {
+            const r = f.getBoundingClientRect();
+            if (r.width > 10 && r.height > 10)
+              return JSON.stringify({ x: r.x + 28, y: r.y + r.height / 2, type: 'hcaptcha' });
+          }
+          return JSON.stringify({ type: 'not_found' });
+        })()
+      `,
+      returnByValue: true,
+    });
+
+    const info = JSON.parse(findResult.result.value);
+
+    if (info.type === "not_found") {
+      // No CAPTCHA found — detach and report
+      await detachDebugger();
+      return { success: false, reason: "No CAPTCHA iframe found after detach/reattach" };
+    }
+
+    // Click immediately at the found position (with tiny jitter)
+    const jx = Math.round((Math.random() - 0.5) * 4);
+    const jy = Math.round((Math.random() - 0.5) * 4);
+    const cx = info.x + jx;
+    const cy = info.y + jy;
+
+    // Mouse move → press → release in rapid succession
+    await sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: cx, y: cy });
+    await sleep(30);
+    await sendCommand("Input.dispatchMouseEvent", {
+      type: "mousePressed", x: cx, y: cy, button: "left", clickCount: 1,
+    });
+    await sleep(50);
+    await sendCommand("Input.dispatchMouseEvent", {
+      type: "mouseReleased", x: cx, y: cy, button: "left", clickCount: 1,
+    });
+
+    // Step 4: Immediately detach — browser is clean for verification
+    await detachDebugger();
+
+    // Step 5: Wait for Cloudflare verification to complete
+    await sleep(3000);
+
+    return {
+      success: true,
+      type: info.type,
+      clickedAt: { x: cx, y: cy },
+      method: "clean_solve",
+    };
+
+  } catch (e) {
+    // Make sure debugger is detached on error
+    try { await detachDebugger(); } catch (_) {}
+    return { success: false, reason: e.message || "Clean solve failed" };
+  }
+}
+
+/**
  * Aggressively try to dismiss a popup/modal using multiple strategies via JS.
  * Returns true if something was dismissed.
  */
@@ -1037,8 +1139,15 @@ async function executeAction(tabId, action) {
     case "click_captcha": {
       const result = await cdpClickCaptcha();
       action._captchaResult = result;
-      // Wait longer for CAPTCHA verification
       await sleep(2000);
+      break;
+    }
+
+    case "clean_captcha_solve": {
+      const result = await cdpCleanCaptchaSolve(tabId);
+      action._cleanSolveResult = result;
+      // Debugger was detached during clean solve — reattach for next steps
+      // (will be reattached automatically on next executeAction call)
       break;
     }
 
