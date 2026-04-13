@@ -66,7 +66,6 @@ function addAction(action) {
     switch_tab: "\u{1F500}",
     close_tab: "\u274C",
     click_captcha: "\u{1F916}",
-    clean_captcha_solve: "\u{1F9F9}",
     stealth_solve: "\u{1F510}",
     dismiss_popup: "\u{1F6AB}",
     accept_dialog: "\u2705",
@@ -142,8 +141,6 @@ function formatAction(action) {
       return `Close tab ${action.tabId}`;
     case "click_captcha":
       return `Click CAPTCHA checkbox`;
-    case "clean_captcha_solve":
-      return `Clean solve (detach → click → detach)`;
     case "stealth_solve":
       return `Stealth solve Cloudflare${action.url ? ": " + action.url : ""}`;
     case "dismiss_popup":
@@ -276,65 +273,29 @@ async function captureScreenshot() {
   };
 }
 
-/**
- * Detect if the current page is a Cloudflare challenge without attaching debugger.
- * Uses chrome.scripting.executeScript (no debugger needed).
- */
-async function isCloudflareChallenge(tabId) {
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        const body = document.body?.innerText || "";
-        const hasChallenge =
-          body.includes("Verify you are human") ||
-          body.includes("Checking your browser") ||
-          body.includes("Just a moment") ||
-          document.querySelector('iframe[src*="challenges.cloudflare.com"]') !== null ||
-          document.querySelector('.cf-turnstile') !== null ||
-          document.querySelector('iframe[src*="turnstile"]') !== null;
-        return hasChallenge;
-      },
-    });
-    return results?.[0]?.result || false;
-  } catch {
-    return false;
-  }
-}
-
 async function captureState() {
   const screenshot = await captureScreenshot();
-
-  // Check if this is a Cloudflare challenge page BEFORE attaching debugger
-  const isCloudflare = await isCloudflareChallenge(screenshot.tabId);
 
   let elements = null;
   let scrollContainers = null;
   let popup = null;
   let captcha = null;
   let isCanvasHeavy = false;
-
-  if (isCloudflare) {
-    // DON'T attach debugger on Cloudflare pages — it taints the session
-    captcha = { type: "Cloudflare Turnstile", cloudflare_page: true };
-  } else {
-    // Normal page — full element extraction via debugger
-    try {
-      const data = await extractElements(screenshot.tabId);
-      elements = data.elements;
-      scrollContainers = data.scrollContainers;
-      popup = data.popup;
-      captcha = data.captcha;
-      isCanvasHeavy = data.isCanvasHeavy;
-    } catch (err) {
-      console.warn("Element extraction failed, using vision-only mode:", err);
-    }
+  try {
+    const data = await extractElements(screenshot.tabId);
+    elements = data.elements;
+    scrollContainers = data.scrollContainers;
+    popup = data.popup;
+    captcha = data.captcha;
+    isCanvasHeavy = data.isCanvasHeavy;
+  } catch (err) {
+    console.warn("Element extraction failed, using vision-only mode:", err);
   }
 
   const agentTabs = await getAgentTabs();
   const dialog = typeof getPendingDialog === "function" ? getPendingDialog() : null;
 
-  return { screenshot, elements, scrollContainers, popup, captcha, dialog, isCanvasHeavy, agentTabs, isCloudflare };
+  return { screenshot, elements, scrollContainers, popup, captcha, dialog, isCanvasHeavy, agentTabs };
 }
 
 // ── Tab Action Executor ─────────────────────────────────────
@@ -518,21 +479,6 @@ async function runAgent(task) {
           );
         }
 
-        // Show clean_captcha_solve verification result
-        if (executed && executed._cleanSolveResult) {
-          const r = executed._cleanSolveResult;
-          if (r.success) {
-            addLog(
-              `<span class="action-icon">\u2705</span> <span>CAPTCHA verified solved: ${escapeHtml(r.verification?.reason || "passed")}</span>`,
-              "log-action"
-            );
-          } else {
-            addLog(
-              `<span class="action-icon">\u274C</span> <span>CAPTCHA not solved: ${escapeHtml(r.verification?.reason || r.reason || "failed")}</span>`,
-              "log-error"
-            );
-          }
-        }
       }
     }
 
