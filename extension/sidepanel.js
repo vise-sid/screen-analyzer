@@ -251,9 +251,23 @@ async function captureScreenshot() {
     await sleep(300);
   }
 
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-    format: "png",
-  });
+  // Retry screenshot capture (fails during page transitions/reloads)
+  let dataUrl = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+        format: "png",
+      });
+      break;
+    } catch (e) {
+      if (attempt < 2) {
+        await sleep(1000); // Wait for page to settle
+      } else {
+        throw e;
+      }
+    }
+  }
+
   return {
     base64: dataUrl.split(",")[1],
     tabId: tab.id,
@@ -428,30 +442,24 @@ async function runAgent(task) {
         continue;
       }
 
-      // Handle stealth_solve — escalate to nodriver for Cloudflare bypass
+      // Handle stealth_solve — escalate to patchright for Cloudflare bypass
       if (result.action.type === "stealth_solve") {
-        const solveUrl = result.action.url || state.screenshot.url || "";
+        // ALWAYS get URL from the actual tab, not from the model
+        const tab = await chrome.tabs.get(state.screenshot.tabId);
+        const targetUrl = tab.url;
         addLog(
           `<div class="thought-label">Stealth Solve</div>` +
-          `<div>Launching stealth browser to bypass Cloudflare on ${escapeHtml(solveUrl)}...</div>`,
+          `<div>Launching stealth browser to bypass Cloudflare on ${escapeHtml(targetUrl)}...</div>`,
           "log-thought"
         );
 
-        // Get current tab URL if not provided
-        let targetUrl = solveUrl;
-        if (!targetUrl) {
-          const tab = await chrome.tabs.get(state.screenshot.tabId);
-          targetUrl = tab.url;
-        }
-
         const solveResult = await stealthSolve(state.screenshot.tabId, targetUrl, API_BASE);
 
-        if (solveResult.success) {
+        if (solveResult.success && solveResult.cf_clearance) {
           addLog(
-            `<span class="action-icon">\u{1F510}</span> <span>Cloudflare bypassed! Injected ${solveResult.cookiesInjected} cookies (cf_clearance: ${solveResult.cf_clearance ? "yes" : "no"}). Page reloaded.</span>`,
+            `<span class="action-icon">\u{1F510}</span> <span>Cloudflare bypassed! Injected ${solveResult.cookiesInjected} cookies. Page reloaded.</span>`,
             "log-action"
           );
-          // Detach debugger since the page reloaded
           await detachDebugger();
           await sleep(2000);
         } else {
