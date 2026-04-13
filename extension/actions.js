@@ -890,14 +890,45 @@ async function cdpCleanCaptchaSolve(tabId) {
     // Step 1: Detach debugger — browser is now genuinely clean
     await detachDebugger();
 
-    // Step 2: Wait for Cloudflare to see the clean state
-    await sleep(2000);
+    // Step 2: Wait for Cloudflare to see the clean state + Turnstile to render
+    await sleep(3000);
+
+    // Step 2.5: Use chrome.scripting to check if Turnstile iframe exists BEFORE reattaching
+    // This avoids reattaching debugger when there's nothing to click
+    let iframeExists = false;
+    for (let retry = 0; retry < 5; retry++) {
+      try {
+        const check = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            return !!(
+              document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
+              document.querySelector('iframe[src*="turnstile"]') ||
+              document.querySelector('.cf-turnstile iframe') ||
+              document.querySelector('iframe[src*="recaptcha"]') ||
+              document.querySelector('iframe[src*="hcaptcha"]')
+            );
+          },
+        });
+        iframeExists = check?.[0]?.result || false;
+        if (iframeExists) break;
+      } catch (e) {}
+      await sleep(1000); // Wait and retry — Turnstile might still be loading
+    }
+
+    if (!iframeExists) {
+      // Check if challenge is already solved (page changed)
+      const verified = await verifyCaptchaSolved(tabId);
+      if (verified.passed) {
+        return { success: true, method: "already_solved", verification: verified };
+      }
+      return { success: false, reason: "No CAPTCHA iframe found — Turnstile may not have rendered" };
+    }
 
     // Step 3: Atomic reattach → find → click → detach (~100ms total)
     await chrome.debugger.attach({ tabId }, "1.3");
     attachedTabId = tabId;
 
-    // Find the CAPTCHA iframe position RIGHT NOW
     const findResult = await sendCommand("Runtime.evaluate", {
       expression: `
         (() => {
