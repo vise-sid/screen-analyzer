@@ -810,6 +810,70 @@ async function cdpClickCaptcha() {
 }
 
 /**
+ * Verify if a CAPTCHA challenge was solved WITHOUT attaching debugger.
+ * Uses chrome.scripting.executeScript to check the page state.
+ */
+async function verifyCaptchaSolved(tabId) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const body = document.body?.innerText || "";
+        const url = window.location.href;
+
+        // Check if challenge elements are still present
+        const hasTurnstile = document.querySelector(
+          'iframe[src*="challenges.cloudflare.com"], .cf-turnstile iframe'
+        );
+        const hasVerifyText =
+          body.includes("Verify you are human") ||
+          body.includes("Checking your browser") ||
+          body.includes("Just a moment");
+
+        // Check if a success indicator is present
+        const hasCheckmark = document.querySelector(
+          '[class*="success"], [class*="checked"], [data-checked="true"]'
+        );
+
+        // Check if the page navigated away from the challenge
+        const isOnChallenge = hasVerifyText && hasTurnstile;
+
+        // Check cf_clearance cookie
+        const hasCfClearance = document.cookie.includes("cf_clearance");
+
+        return {
+          hasTurnstile: !!hasTurnstile,
+          hasVerifyText,
+          hasCheckmark: !!hasCheckmark,
+          hasCfClearance,
+          isOnChallenge,
+          url,
+          bodyPreview: body.substring(0, 200),
+        };
+      },
+    });
+
+    const check = results?.[0]?.result;
+    if (!check) return { passed: false, reason: "Verification script failed" };
+
+    // If cf_clearance cookie exists, it passed
+    if (check.hasCfClearance) {
+      return { passed: true, reason: "cf_clearance cookie found", ...check };
+    }
+
+    // If the challenge text is gone, it likely passed
+    if (!check.isOnChallenge && !check.hasVerifyText) {
+      return { passed: true, reason: "Challenge page no longer visible", ...check };
+    }
+
+    // Still on the challenge page
+    return { passed: false, reason: "Challenge still present", ...check };
+  } catch (e) {
+    return { passed: false, reason: e.message || "Verification error" };
+  }
+}
+
+/**
  * CLEAN CAPTCHA SOLVE — the nuclear option.
  * Detaches debugger (browser becomes genuinely clean), waits for Cloudflare
  * to see a real browser, then does an atomic reattach→find→click→detach
@@ -895,13 +959,17 @@ async function cdpCleanCaptchaSolve(tabId) {
     await detachDebugger();
 
     // Step 5: Wait for Cloudflare verification to complete
-    await sleep(3000);
+    await sleep(4000);
+
+    // Step 6: VERIFY — check if the challenge is actually gone (no debugger needed)
+    const verified = await verifyCaptchaSolved(tabId);
 
     return {
-      success: true,
+      success: verified.passed,
       type: info.type,
       clickedAt: { x: cx, y: cy },
       method: "clean_solve",
+      verification: verified,
     };
 
   } catch (e) {

@@ -509,11 +509,29 @@ async function runAgent(task) {
         await executeTabAction(result.action);
       } else {
         const executed = await executeAction(state.screenshot.tabId, result.action);
+
+        // Show extracted text
         if (executed && executed._extractedText) {
           addLog(
             `<div class="thought-label">Extracted Text</div><div>${escapeHtml(executed._extractedText)}</div>`,
             "log-thought"
           );
+        }
+
+        // Show clean_captcha_solve verification result
+        if (executed && executed._cleanSolveResult) {
+          const r = executed._cleanSolveResult;
+          if (r.success) {
+            addLog(
+              `<span class="action-icon">\u2705</span> <span>CAPTCHA verified solved: ${escapeHtml(r.verification?.reason || "passed")}</span>`,
+              "log-action"
+            );
+          } else {
+            addLog(
+              `<span class="action-icon">\u274C</span> <span>CAPTCHA not solved: ${escapeHtml(r.verification?.reason || r.reason || "failed")}</span>`,
+              "log-error"
+            );
+          }
         }
       }
     }
