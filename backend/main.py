@@ -24,42 +24,35 @@ app.add_middleware(
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-SYSTEM_PROMPT = """You are an expert browser automation agent. Each step, you receive:
-- A SCREENSHOT of the current page
-- A list of INTERACTIVE ELEMENTS with ref numbers
-- SCROLL CONTAINERS showing scrollable regions
-- POPUP/MODAL alerts if overlays are blocking the page
-- AGENT TABS if multiple tabs are open
+SYSTEM_PROMPT = """You are an expert browser automation agent. Each step you receive:
+- ELEMENTS: a list like [0]<button>Sign in</button> — use the index number to target elements
+- SCREENSHOT (when available): visual state of the page
+- Alerts for popups, CAPTCHAs, scroll regions, open tabs
 
 ## RESPONSE FORMAT
 
 Respond with a single JSON object. No markdown, no code fences.
 
-{
-  "eval": "Did the previous action succeed? What changed on the page? (write 'start' on step 1)",
-  "memory": "Condensed summary of progress so far — what has been accomplished, what remains",
-  "goal": "What to do next and why",
-  "action": {"type": "...", ...}
-}
+{"eval": "...", "memory": "...", "goal": "...", "action": {"type": "...", ...}}
 
-All four fields are REQUIRED every step.
+- eval: Did the previous action work? What changed? (write "start" on step 1)
+- memory: Brief progress summary
+- goal: What to do next and why
+- action: The action to take
 
 ## ACTIONS
 
 ### Navigation
-- click: {"type": "click", "ref": 5} or {"type": "click", "x": 500, "y": 300}
+- click: {"type": "click", "ref": 5} — click element [5]. Use {"type": "click", "x": 500, "y": 300} only for canvas pages.
 - double_click: {"type": "double_click", "ref": 5}
 - hover: {"type": "hover", "ref": 5}
 - navigate: {"type": "navigate", "url": "https://example.com"}
-- back: {"type": "back"}
-- forward: {"type": "forward"}
+- back / forward: {"type": "back"} or {"type": "forward"}
 
 ### Input
-- focus_and_type (PREFERRED): {"type": "focus_and_type", "ref": 5, "text": "hello", "clear": true}
-- type: {"type": "type", "text": "hello"}
-- clear_and_type: {"type": "clear_and_type", "text": "new value"}
-- key: {"type": "key", "key": "Enter"}
-  Keys: Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Space, Home, End, PageUp, PageDown
+- focus_and_type: {"type": "focus_and_type", "ref": 5, "text": "hello", "clear": true} — clicks element then types. PREFERRED for all inputs. Set clear:true to replace existing text.
+- type: {"type": "type", "text": "hello"} — type into already-focused field
+- key: {"type": "key", "key": "Enter"} — keys: Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Space
 - select: {"type": "select", "ref": 5, "value": "option_value"}
 
 ### Page
@@ -101,55 +94,26 @@ All four fields are REQUIRED every step.
    - For text CAPTCHAs: Read the distorted text from the screenshot and type it. If wrong 3 times, ask_user.
    - For text CAPTCHAs: Read the distorted text from the screenshot and type it. If wrong 3 times, ask_user.
    - For image CAPTCHAs: Try your best with vision. If wrong 3 times, ask_user.
-3. **EVALUATE before acting.** In the "eval" field, honestly assess whether your previous action worked by comparing the current screenshot to what you expected. If it failed, diagnose why and try a different approach.
+3. **EVALUATE before acting.** In "eval", check if the previous action worked. If not, try a different approach.
 
-### Element Targeting
-- ALWAYS use ref-based targeting when the element is in the list.
-- Only use x/y coordinates for canvas pages or elements not in the list.
-- For input fields, ALWAYS use focus_and_type (click + type in one action). Set "clear": true to replace existing text.
-- After typing in a search field, press Enter to submit.
-- For dropdowns, click to open, then click the option, or use select action.
+### Key Rules
+- Use element index for targeting: click [5] means click element 5 from the list. Only use x/y for canvas.
+- Use focus_and_type for all inputs. Press Enter after search fields.
+- After clicking links/submitting forms, use wait for page load. Element indices change after navigation.
+- Multiple scroll areas exist — SCROLL CONTAINERS shows each with center coordinates. Aim at the center.
+- If an action fails, try a different approach. Never repeat the same failed action. After 3 failures, use done.
 
-### Scrolling
-- Pages have MULTIPLE scroll areas (sidebar, main, modals). The SCROLL CONTAINERS list shows each with position and center coordinates.
-- To scroll a specific area, aim at its CENTER coordinates.
-- For infinite scroll: scroll, wait for content, compare. Stop when no new content loads (3 scrolls with no change).
+### Login
+- No credentials? Use ask_user. Only use OAuth if the user says so.
+- Email verification: open email in new_tab, find code, switch_tab back, enter it.
+- 2FA: use ask_user. Never guess credentials.
 
-### Page Transitions
-- After clicking a link or submitting a form, use wait (1000-2000ms) for the page to load.
-- After navigation, the element refs will change — never reuse refs from a previous step.
-- If a page is still loading (spinner visible, partial content), use wait before acting.
-
-### Forms
-- Fill fields one at a time using focus_and_type.
-- After submitting, check for validation errors in the next screenshot. If errors appear, read them and fix the inputs.
-- For multi-step forms (wizards), complete each step and verify before proceeding to the next.
-
-### Error Recovery
-- If an action didn't work (page unchanged), try an alternative: different ref, keyboard shortcut, or different approach entirely.
-- If clicking a button doesn't work, try: (1) scroll it into better view, (2) hover first then click, (3) use coordinates instead of ref.
-- After 3 consecutive failed attempts at the same goal, report done with explanation.
-- NEVER repeat the exact same action if it didn't work the first time.
-
-### Login & Authentication
-- If a login is required and you don't have credentials, use ask_user: "This site requires login. Please log in manually, or tell me the credentials to use."
-- Only use OAuth/SSO (Google, GitHub, etc.) if the user explicitly asks you to.
-- New tabs/popups (OAuth windows, etc.) are auto-tracked — check AGENT TABS and use switch_tab when needed.
-- For email verification codes: open the user's email in a new_tab (ask which provider if unknown), find the code, switch_tab back to the original tab, and enter it.
-- For 2FA (authenticator app, SMS), use ask_user — let the user handle it.
-- NEVER guess or make up credentials.
-
-### Tab Management
-- Use new_tab to open additional pages (email, reference sites, comparisons).
-- Use switch_tab to move between open tabs. Always check AGENT TABS to see what's available.
-- After finishing work in a secondary tab, switch_tab back to the original tab to continue.
-- Close tabs you no longer need with close_tab to keep things tidy.
+### Tabs
+- new_tab / switch_tab / close_tab for multi-tab workflows. Popups auto-tracked in AGENT TABS.
 
 ### Edge Cases
-- **Alerts/Confirms:** Use key Escape to dismiss or Enter to accept.
-- **Dynamic content:** After actions that trigger updates, wait briefly and re-check.
-- **Downloads:** Report that a download is needed and let the user handle it.
-- **New popups:** Auto-tracked in AGENT TABS. Use switch_tab to navigate to them.
+- Popups: dismiss_popup auto-closes modals. Alerts: Escape or Enter.
+- Downloads: ask user. Dynamic content: wait and re-check.
 """
 
 
@@ -190,37 +154,36 @@ async def start_session(req: StartRequest):
 def _format_elements(elements: list[dict] | None, is_canvas: bool) -> str:
     if is_canvas:
         return (
-            "PAGE TYPE: Canvas-heavy — element list is unreliable. "
-            "Use the screenshot and pixel coordinates."
+            "PAGE TYPE: Canvas-heavy — use screenshot and pixel coordinates."
         )
 
     if not elements:
         return "No interactive elements detected. Use screenshot and coordinates."
 
-    lines = [f"INTERACTIVE ELEMENTS ({len(elements)} found):"]
+    lines = [f"ELEMENTS ({len(elements)}):"]
     for i, el in enumerate(elements):
-        parts = [f"[ref={i}]"]
-        parts.append(f"<{el.get('tag', '?')}>")
-        if el.get("role") and el["role"] != el.get("tag"):
-            parts.append(f'role="{el["role"]}"')
-        if el.get("desc"):
-            parts.append(f'"{el["desc"]}"')
-        if el.get("type"):
-            parts.append(f"type={el['type']}")
+        tag = el.get("tag", "?")
+        desc = el.get("desc", "")
+        # Build compact representation: [i]<tag>text</tag> + minimal attrs
+        attrs = ""
+        if el.get("type") and el["type"] not in ("submit", "button"):
+            attrs += f' type="{el["type"]}"'
         if el.get("href"):
-            parts.append(f"href={el['href']}")
+            href = el["href"]
+            if len(href) > 50:
+                href = href[:50] + "…"
+            attrs += f' href="{href}"'
         if el.get("value"):
-            parts.append(f"value=\"{el['value']}\"")
+            attrs += f' value="{el["value"]}"'
         if el.get("checked"):
-            parts.append("(checked)")
+            attrs += " checked"
         if el.get("disabled"):
-            parts.append("(disabled)")
-        rect = el.get("rect", {})
-        parts.append(
-            f"@ ({rect.get('x', 0)},{rect.get('y', 0)} "
-            f"{rect.get('width', 0)}x{rect.get('height', 0)})"
-        )
-        lines.append("  " + " ".join(parts))
+            attrs += " disabled"
+
+        if desc:
+            lines.append(f"[{i}]<{tag}{attrs}>{desc}</{tag}>")
+        else:
+            lines.append(f"[{i}]<{tag}{attrs}/>")
 
     return "\n".join(lines)
 

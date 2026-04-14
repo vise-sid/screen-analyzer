@@ -103,7 +103,7 @@ function addLoading() {
 
 function formatAction(action) {
   const refStr = (a) =>
-    a.ref !== undefined ? `[ref=${a.ref}]` : `(${a.x}, ${a.y})`;
+    a.ref !== undefined ? `[${a.ref}]` : `(${a.x}, ${a.y})`;
 
   switch (action.type) {
     case "click":
