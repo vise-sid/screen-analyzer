@@ -1,29 +1,29 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 :root {
-  --bg: #1D1F27;
-  --bg-card: #25272F;
-  --bg-hover: #2C2F3A;
-  --bg-input: #2C2F3A;
-  --border: #3B3E4A;
+  --bg: #111118;
+  --bg-card: #1A1A24;
+  --bg-hover: #222230;
+  --bg-input: #1E1E2A;
+  --border: #2E2E40;
   --text: #FFFFFF;
-  --text-secondary: #D1D5DB;
-  --text-muted: #9CA3AF;
-  --orange: #FF8C00;
-  --orange-bg: rgba(255, 140, 0, 0.08);
-  --orange-border: rgba(255, 140, 0, 0.2);
-  --blue: #5FC9F8;
-  --blue-bg: rgba(95, 201, 248, 0.08);
-  --green: #3DDC84;
-  --green-bg: rgba(61, 220, 132, 0.08);
-  --green-border: rgba(61, 220, 132, 0.2);
-  --red: #FF5C5C;
-  --red-bg: rgba(255, 92, 92, 0.08);
-  --red-border: rgba(255, 92, 92, 0.2);
-  --yellow: #F7A600;
-  --yellow-bg: rgba(247, 166, 0, 0.08);
-  --yellow-border: rgba(247, 166, 0, 0.2);
-  --purple: #B07FFF;
+  --text-secondary: #E2E4E9;
+  --text-muted: #A0A3B1;
+  --orange: #FF9F43;
+  --orange-bg: rgba(255, 159, 67, 0.1);
+  --orange-border: rgba(255, 159, 67, 0.3);
+  --blue: #74B9FF;
+  --blue-bg: rgba(116, 185, 255, 0.1);
+  --green: #55EFC4;
+  --green-bg: rgba(85, 239, 196, 0.1);
+  --green-border: rgba(85, 239, 196, 0.3);
+  --red: #FF6B6B;
+  --red-bg: rgba(255, 107, 107, 0.1);
+  --red-border: rgba(255, 107, 107, 0.3);
+  --yellow: #FECA57;
+  --yellow-bg: rgba(254, 202, 87, 0.1);
+  --yellow-border: rgba(254, 202, 87, 0.3);
+  --purple: #A29BFE;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
