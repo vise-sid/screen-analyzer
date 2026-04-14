@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Screen Analyzer",
+  "name": "PixelFoxx",
   "version": "2.0.0",
-  "description": "Capture your screen and get AI-powered analysis via Gemini",
+  "description": "AI browser agent that navigates and automates tasks for you — pixelfoxx.io",
   "permissions": ["activeTab", "sidePanel", "tabs", "tabGroups", "debugger", "cookies"],
   "host_permissions": ["<all_urls>"],
   "background": {
@@ -12,7 +12,7 @@
     "default_path": "sidepanel.html"
   },
   "action": {
-    "default_title": "Open Screen Analyzer"
+    "default_title": "Open PixelFoxx"
   },
   "icons": {
     "16": "icons/icon16.png",
