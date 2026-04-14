@@ -7,6 +7,14 @@
 let attachedTabId = null;
 let elementMap = {};
 
+// Track when Chrome auto-detaches the debugger (cross-origin navigation, tab close, etc.)
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId === attachedTabId) {
+    console.log(`Debugger auto-detached from tab ${source.tabId}: ${reason}`);
+    attachedTabId = null;
+  }
+});
+
 // ── Debugger Management ─────────────────────────────────────
 
 async function attachDebugger(tabId) {
