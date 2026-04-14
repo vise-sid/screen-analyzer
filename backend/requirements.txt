@@ -3,3 +3,8 @@ uvicorn
 google-genai
 python-dotenv
 patchright
+beautifulsoup4
+markdownify
+gspread
+google-auth
+httpx

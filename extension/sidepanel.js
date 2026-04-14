@@ -56,7 +56,8 @@ function addAction(action) {
     click: "\u{1F446}",        double_click: "\u{1F446}",
     hover: "\u{1F441}",        focus_and_type: "\u2328\uFE0F",
     type: "\u2328\uFE0F",      clear_and_type: "\u2328\uFE0F",
-    key: "\u26A1",              select: "\u{1F4CB}",
+    key: "\u26A1",              key_combo: "\u26A1",
+    select: "\u{1F4CB}",
     scroll: "\u{1F4DC}",       navigate: "\u{1F30D}",
     back: "\u2B05\uFE0F",      forward: "\u27A1\uFE0F",
     extract_text: "\u{1F4D6}", screenshot: "\u{1F4F7}",
@@ -66,6 +67,20 @@ function addAction(action) {
     accept_dialog: "\u2705",    dismiss_dialog: "\u274C",
     ask_user: "\u{1F64B}",      wait: "\u23F3",
     done: "\u2705",
+    // Scraping & Memory
+    scrape_page: "\u{1F4C4}",    scrape_table: "\u{1F4CA}",
+    scrape_links: "\u{1F517}",   scrape_metadata: "\u{1F3F7}",
+    scrape_network: "\u{1F310}", store: "\u{1F4BE}",
+    recall: "\u{1F4E5}",
+    // Planning & Intelligence
+    plan: "\u{1F9E0}",           google_search: "\u{1F50D}",
+    ask_advisor: "\u{1F4A1}",    fill_cells: "\u{1F4DD}",
+    // Google Workspace API
+    sheets_create: "\u{1F4CA}",  sheets_write: "\u270D\uFE0F",
+    sheets_read: "\u{1F4D6}",
+    docs_create: "\u{1F4DD}",    docs_write: "\u270D\uFE0F",
+    docs_read: "\u{1F4D6}",
+    slides_create: "\u{1F4FD}",  slides_read: "\u{1F4D6}",
   };
   const icon = icons[action.type] || "\u25B6\uFE0F";
   addLog(
@@ -118,6 +133,8 @@ function formatAction(action) {
       return `Clear & type "${action.text}"`;
     case "key":
       return `Press ${action.key}`;
+    case "key_combo":
+      return `Key combo ${action.keys}`;
     case "select":
       return `Select "${action.value}" in [ref=${action.ref}]`;
     case "scroll": {
@@ -154,6 +171,45 @@ function formatAction(action) {
       return `Wait ${action.duration}ms`;
     case "done":
       return `Task complete`;
+    // Scraping & Memory
+    case "scrape_page":
+      return `Scrape full page to Markdown`;
+    case "scrape_table":
+      return `Extract table${action.ref !== undefined ? ` [ref=${action.ref}]` : ""}`;
+    case "scrape_links":
+      return `Extract all page links`;
+    case "scrape_metadata":
+      return `Extract page metadata`;
+    case "scrape_network":
+      return `Show captured API responses`;
+    case "store":
+      return `Store to memory: "${action.key || "default"}"`;
+    case "recall":
+      return `Recall from memory: "${action.key || "default"}"`;
+    case "plan":
+      return `Creating execution plan`;
+    case "google_search":
+      return `Searching: "${action.query || ""}"`;
+    case "ask_advisor":
+      return `Consulting advisor: "${(action.question || "").substring(0, 60)}"`;
+    case "fill_cells":
+      return `Fill ${(action.values || []).length} cells from ${action.startCell || "A1"} (${action.direction || "down"})`;
+    case "sheets_create":
+      return `Create spreadsheet: "${action.title || "Untitled"}"`;
+    case "sheets_write":
+      return `Write ${(action.values || []).length} rows to ${action.range || "A1"}`;
+    case "sheets_read":
+      return `Read cells ${action.range || "A1:Z100"}`;
+    case "docs_create":
+      return `Create doc: "${action.title || "Untitled"}"`;
+    case "docs_write":
+      return `Write to doc`;
+    case "docs_read":
+      return `Read doc`;
+    case "slides_create":
+      return `Create presentation: "${action.title || "Untitled"}"`;
+    case "slides_read":
+      return `Read slides`;
     default:
       return JSON.stringify(action);
   }
@@ -207,8 +263,14 @@ function pauseForUser(question) {
 // ── Loop Detection ──────────────────────────────────────────
 
 /**
- * Detect if the agent is stuck in a loop by checking for repeated identical actions.
+ * Detect if the agent is stuck in a loop by checking for repeated actions.
  * Returns a warning string if a loop is detected, null otherwise.
+ *
+ * Catches:
+ * - 3 identical actions in a row
+ * - A-B-A-B oscillation
+ * - Same action TYPE repeated 4+ times (e.g., scroll with varying params)
+ * - Scroll up/down oscillation (scroll loop)
  */
 function detectLoop(actionHistory) {
   if (actionHistory.length < 3) return null;
@@ -217,9 +279,7 @@ function detectLoop(actionHistory) {
   // All 3 identical
   if (last3[0] === last3[1] && last3[1] === last3[2]) {
     return `LOOP DETECTED: You have repeated the same action 3 times: ${last3[0]}. ` +
-      `This action is not working. Try a completely different approach: ` +
-      `use keyboard navigation (Tab/Enter), try a different element, scroll to reveal the target, ` +
-      `or use coordinates instead of ref (or vice versa). If truly stuck, use done.`;
+      `This action is not working. Try a completely different approach or use done to report what you found so far.`;
   }
 
   // Oscillating between 2 actions
@@ -227,8 +287,40 @@ function detectLoop(actionHistory) {
     const last4 = actionHistory.slice(-4);
     if (last4[0] === last4[2] && last4[1] === last4[3] && last4[0] !== last4[1]) {
       return `OSCILLATION DETECTED: You are alternating between two actions. ` +
-        `Break the cycle by trying a completely different approach or reporting done.`;
+        `Stop and try a completely different approach, or use done to report what you found.`;
     }
+  }
+
+  // Same action TYPE repeated 4+ times (catches scroll loops with varying params)
+  if (actionHistory.length >= 4) {
+    try {
+      const lastTypes = actionHistory.slice(-4).map(a => JSON.parse(a).type);
+      const allSame = lastTypes.every(t => t === lastTypes[0]);
+      if (allSame) {
+        return `TYPE LOOP DETECTED: You have used "${lastTypes[0]}" 4 times in a row. ` +
+          `This is not making progress. If you already have the information you need ` +
+          `(from a previous scrape or from the element list), use done NOW to report your findings. ` +
+          `If you truly need more data, try scrape_page instead of scrolling.`;
+      }
+    } catch (_) {}
+  }
+
+  // Scroll direction oscillation: up-down-up or down-up-down (catches scroll ping-pong)
+  if (actionHistory.length >= 5) {
+    try {
+      const last5 = actionHistory.slice(-5).map(a => {
+        const parsed = JSON.parse(a);
+        if (parsed.type !== "scroll") return null;
+        return (parsed.deltaY || 0) > 0 ? "down" : "up";
+      });
+      if (last5.every(d => d !== null)) {
+        const changes = last5.filter((d, i) => i > 0 && d !== last5[i - 1]).length;
+        if (changes >= 3) {
+          return `SCROLL LOOP DETECTED: You are scrolling up and down repeatedly without progress. ` +
+            `STOP scrolling. Use scrape_page to get the page content, then use done to report your findings.`;
+        }
+      }
+    } catch (_) {}
   }
 
   return null;
@@ -400,11 +492,35 @@ async function runAgent(task) {
     const { session_id } = await startRes.json();
     sessionId = session_id;
 
+    addLog(`<span class="action-icon">\u{1F9E0}</span> <span>Planning strategy...</span>`, "log-action");
+
+    let googleToken = null;  // Cached Google OAuth token (fetched on demand)
+
+    // Pre-fetch Google OAuth token (silent, non-interactive first attempt)
+    // If the task needs Sheets/Drive, this ensures the token is ready
+    try {
+      googleToken = await new Promise((resolve) => {
+        chrome.identity.getAuthToken({ interactive: false }, (token) => {
+          if (chrome.runtime.lastError || !token) {
+            resolve(null); // Not signed in or no consent yet — will prompt interactively when needed
+          } else {
+            resolve(token);
+          }
+        });
+      });
+      if (googleToken) {
+        console.log("Google OAuth token pre-fetched (silent)");
+      }
+    } catch (_) {
+      googleToken = null;
+    }
+
     // Agent loop
     let completed = false;
     const actionHistory = [];
     let consecutiveFailures = 0;
     let killRetries = 0;
+    let lastActionResult = null;  // Scrape/extract/recall result to send back to LLM
     for (let step = 0; step < MAX_STEPS && running; step++) {
       // ── Timing: track every phase ──
       const t0 = performance.now();
@@ -429,6 +545,15 @@ async function runAgent(task) {
       };
       if (state.screenshot.base64) {
         requestBody.image = state.screenshot.base64;
+      }
+      // Include action result from previous scrape/extract/recall
+      if (lastActionResult) {
+        requestBody.action_result = lastActionResult;
+        lastActionResult = null;  // Clear after sending
+      }
+      // Include Google OAuth token if we have one (for Sheets API actions)
+      if (googleToken) {
+        requestBody.google_token = googleToken;
       }
       const loopWarning = detectLoop(actionHistory);
       if (loopWarning) requestBody.loop_warning = loopWarning;
@@ -498,6 +623,97 @@ async function runAgent(task) {
         addDone(result.action.summary || "Task complete.");
         completed = true;
         shouldBreak = true;
+      } else if (result.action.type === "plan") {
+        // Flash created its execution plan — show it prominently
+        const planText = result.action.plan || result.thought || "";
+        addLog(
+          `<div class="thought-label">\u{1F9E0} PLANNING</div><pre class="scraped-preview">${escapeHtml(planText)}</pre>`,
+          "log-thought"
+        );
+        shouldContinue = true;
+      } else if (result.action.type === "google_search") {
+        // Google search for URL discovery — result comes back from backend
+        const searchData = result._search_data || "";
+        if (searchData) {
+          lastActionResult = searchData;
+          addLog(
+            `<div class="thought-label">\u{1F50D} SEARCH</div><div>${escapeHtml(searchData.substring(0, 300))}</div>`,
+            "log-thought"
+          );
+        }
+        shouldContinue = true;
+      } else if (result.action.type === "ask_advisor") {
+        // Consulted the Pro model for complex reasoning
+        const advice = result._advisor_response || "";
+        if (advice) {
+          lastActionResult = advice;
+          addLog(
+            `<div class="thought-label">\u{1F4A1} ADVISOR</div><pre class="scraped-preview">${escapeHtml(advice)}</pre>`,
+            "log-thought"
+          );
+        }
+        shouldContinue = true;
+      } else if ([
+        "sheets_create", "sheets_write", "sheets_read",
+        "docs_create", "docs_write", "docs_read",
+        "slides_create", "slides_read",
+      ].includes(result.action.type)) {
+        // Google Workspace API actions — handled server-side
+        const gr = result._gwork_result || {};
+        if (gr.error) {
+          // If error is about missing token, try interactive auth
+          if (gr.error.includes("OAuth token") || gr.error.includes("not connected")) {
+            addLog(`<span class="action-icon">\u{1F511}</span> <span>Connecting to Google — approve in popup...</span>`, "log-action");
+
+            // Detach debugger BEFORE OAuth to prevent crash on consent page
+            await detachDebugger();
+            const preAuthTab = await resolveAgentTab();
+
+            try {
+              // Blocks until user approves/rejects consent popup
+              googleToken = await getGoogleAuthToken();
+              if (googleToken) {
+                addLog(`<span class="action-icon">\u2705</span> <span>Google connected! Retrying...</span>`, "log-action");
+                lastActionResult = "Google OAuth connected. Retry the action.";
+              } else {
+                lastActionResult = "GOOGLE ERROR: OAuth not available. Sign into Chrome with Google account.";
+              }
+            } catch (authErr) {
+              lastActionResult = `GOOGLE ERROR: Auth failed — ${authErr.message}`;
+            }
+
+            // Switch back to original tab after OAuth completes
+            try {
+              await chrome.tabs.update(preAuthTab.id, { active: true });
+              await sleep(500);
+            } catch (_) {}
+          } else {
+            addLog(`<div class="thought-label">\u26A0\uFE0F GOOGLE ERROR</div><div>${escapeHtml(gr.error)}</div>`, "log-error");
+            lastActionResult = `GOOGLE ERROR: ${gr.error}`;
+          }
+        } else {
+          // Success — show result based on action type
+          const url = gr.url || "";
+          const title = gr.title || result.action.title || "Untitled";
+          const atype = result.action.type;
+
+          if (atype.endsWith("_create")) {
+            const icon = atype.startsWith("sheets") ? "\u{1F4CA}" : atype.startsWith("docs") ? "\u{1F4DD}" : "\u{1F4FD}";
+            const label = atype.startsWith("sheets") ? "SHEET" : atype.startsWith("docs") ? "DOC" : "SLIDES";
+            addLog(
+              `<div class="thought-label">${icon} ${label} CREATED</div><div><a href="${escapeHtml(url)}" target="_blank">${escapeHtml(title)}</a></div>`,
+              "log-thought"
+            );
+          } else if (atype.endsWith("_write")) {
+            addLog(`<div class="thought-label">\u270D\uFE0F WRITTEN</div><div>${escapeHtml(JSON.stringify(gr).substring(0, 200))}</div>`, "log-thought");
+          } else if (atype.endsWith("_read")) {
+            const data = JSON.stringify(gr, null, 2);
+            const preview = data.length > 500 ? data.substring(0, 500) + "..." : data;
+            addLog(`<div class="thought-label">\u{1F4D6} READ</div><pre class="scraped-preview">${escapeHtml(preview)}</pre>`, "log-thought");
+          }
+          lastActionResult = JSON.stringify(gr);
+        }
+        shouldContinue = true;
       } else if (result.action.type === "ask_user") {
         await pauseForUser(result.action.question || "Please help.");
         if (!running) { shouldBreak = true; } else { shouldContinue = true; }
@@ -514,10 +730,68 @@ async function runAgent(task) {
         shouldContinue = true;
       } else if (["new_tab", "switch_tab", "close_tab"].includes(result.action.type)) {
         await executeTabAction(result.action);
+      } else if (result.action.type === "store") {
+        // Store: send lastActionResult to backend via the next step's action_result
+        // The backend handles the actual storage when it processes the model response
+        if (lastActionResult) {
+          addLog(`<div class="thought-label">\u{1F4BE} STORING</div><div>Key: "${escapeHtml(result.action.key || 'default')}" (${(lastActionResult.length / 1024).toFixed(1)}KB)</div>`, "log-thought");
+        } else {
+          addLog(`<div class="thought-label">\u{1F4BE} STORE</div><div>No data to store — use a scrape action first</div>`, "log-thought");
+        }
+        // Don't clear lastActionResult — the backend needs it in the next step to actually store
+      } else if (result.action.type === "recall") {
+        // Recall: backend returns the data in result._recall_data
+        if (result._recall_data) {
+          lastActionResult = result._recall_data;
+          const preview = result._recall_data.length > 300
+            ? result._recall_data.substring(0, 300) + "..."
+            : result._recall_data;
+          addLog(`<div class="thought-label">\u{1F4E5} RECALLED</div><pre class="scraped-preview">${escapeHtml(preview)}</pre>`, "log-thought");
+        } else {
+          addLog(`<div class="thought-label">\u{1F4E5} RECALL</div><div>Key not found</div>`, "log-thought");
+        }
       } else {
         const executed = await executeAction(state.screenshot.tabId, result.action);
+        // Handle extracted text (existing)
         if (executed && executed._extractedText) {
           addLog(`<div class="thought-label">\u{1F4D6} EXTRACTED</div><div>${escapeHtml(executed._extractedText)}</div>`, "log-thought");
+          lastActionResult = executed._extractedText;
+        }
+        // Handle scraped data (new)
+        if (executed && executed._scrapedData && !executed._extractedText) {
+          const scraped = typeof executed._scrapedData === "string"
+            ? executed._scrapedData
+            : JSON.stringify(executed._scrapedData, null, 2);
+          lastActionResult = scraped;
+          const preview = scraped.length > 500
+            ? scraped.substring(0, 500) + "..."
+            : scraped;
+          addLog(`<div class="thought-label">\u{1F4CA} SCRAPED</div><pre class="scraped-preview">${escapeHtml(preview)}</pre>`, "log-thought");
+        }
+        // Handle fill_cells result
+        if (executed && executed._fillResult) {
+          const fr = executed._fillResult;
+          if (fr.error) {
+            addLog(`<div class="thought-label">\u26A0\uFE0F FILL FAILED</div><div>${escapeHtml(fr.error)}</div>`, "log-error");
+          } else {
+            addLog(
+              `<div class="thought-label">\u{1F4DD} FILLED</div><div>${fr.count} cells from ${fr.startCell} (${fr.direction}): ${fr.values.join(", ")}</div>`,
+              "log-thought"
+            );
+          }
+        }
+        // Handle input verification — warn if typed text didn't match
+        if (executed && executed._inputVerification) {
+          const v = executed._inputVerification;
+          if (!v.match) {
+            addLog(
+              `<div class="thought-label">\u26A0\uFE0F INPUT MISMATCH</div>` +
+              `<div>Intended: "${escapeHtml(v.intended)}"<br>Actual: "${escapeHtml(v.actual)}"</div>`,
+              "log-error"
+            );
+            // Send mismatch info to LLM so it can correct
+            lastActionResult = `INPUT MISMATCH: Intended "${v.intended}" but field contains "${v.actual}". Use focus_and_type with clear:true to fix.`;
+          }
         }
       }
 

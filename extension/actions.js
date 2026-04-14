@@ -7,11 +7,44 @@
 let attachedTabId = null;
 let elementMap = {};
 
+// ── Network Interception for Scraping ───────────────────────
+let capturedNetworkJson = [];  // Captured JSON API responses
+const MAX_NETWORK_CAPTURES = 50;
+
 // Track when Chrome auto-detaches the debugger (cross-origin navigation, tab close, etc.)
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === attachedTabId) {
     console.log(`Debugger auto-detached from tab ${source.tabId}: ${reason}`);
     attachedTabId = null;
+    capturedNetworkJson = [];  // Clear captures on detach
+  }
+});
+
+// Listen for CDP events (network responses)
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (source.tabId !== attachedTabId) return;
+
+  if (method === "Network.responseReceived") {
+    const resp = params.response;
+    const contentType = resp.mimeType || resp.headers?.["content-type"] || "";
+    if (contentType.includes("json")) {
+      capturedNetworkJson.push({
+        requestId: params.requestId,
+        url: resp.url,
+        status: resp.status,
+        mimeType: contentType,
+        timestamp: Date.now(),
+      });
+      // Cap at max entries
+      if (capturedNetworkJson.length > MAX_NETWORK_CAPTURES) {
+        capturedNetworkJson = capturedNetworkJson.slice(-MAX_NETWORK_CAPTURES);
+      }
+    }
+  }
+
+  // Clear captures on main frame navigation (new page)
+  if (method === "Network.requestWillBeSent" && params.type === "Document" && params.frameId === params.loaderId) {
+    capturedNetworkJson = [];
   }
 });
 
@@ -22,6 +55,10 @@ async function attachDebugger(tabId) {
   if (attachedTabId !== null) await detachDebugger();
   await chrome.debugger.attach({ tabId }, "1.3");
   attachedTabId = tabId;
+
+  // Enable network interception for JSON API capture
+  await sendCommand("Network.enable");
+  capturedNetworkJson = [];  // Fresh start
 
   // Apply stealth patches to avoid anti-bot detection
   await applyStealthPatches();
@@ -646,6 +683,17 @@ async function cdpDoubleClick(x, y) {
 
 async function cdpType(text) {
   for (const char of text) {
+    // Convert \n and \r to Enter keypress, \t to Tab keypress
+    if (char === "\n" || char === "\r") {
+      await cdpKey("Enter");
+      await sleep(30 + Math.random() * 40);
+      continue;
+    }
+    if (char === "\t") {
+      await cdpKey("Tab");
+      await sleep(30 + Math.random() * 40);
+      continue;
+    }
     await sendCommand("Input.dispatchKeyEvent", {
       type: "keyDown", text: char, key: char, unmodifiedText: char,
     });
@@ -744,6 +792,220 @@ async function cdpExtractText(ref) {
   });
   return result.result.value || "(empty)";
 }
+
+// ── Scraping CDP Functions ──────────────────────────────────
+
+const API_BASE_ACTIONS = "http://localhost:8000";
+
+async function cdpScrapePageHtml() {
+  // Grab the full rendered HTML, send to backend for BS4 + markdownify parsing
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: "document.documentElement.outerHTML",
+    returnByValue: true,
+  });
+  const html = result.result.value;
+  if (!html) return JSON.stringify({ error: "Could not get page HTML" });
+
+  try {
+    const resp = await fetch(`${API_BASE_ACTIONS}/scrape/page`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html }),
+    });
+    const data = await resp.json();
+    return JSON.stringify(data, null, 2);
+  } catch (err) {
+    return JSON.stringify({ error: `Scrape endpoint failed: ${err.message}` });
+  }
+}
+
+async function cdpScrapeTableHtml(ref) {
+  // Find the table element (by ref or first <table>), extract its HTML, send to backend
+  let expression;
+  if (ref !== undefined && ref !== null) {
+    const coords = resolveRef(ref);
+    if (coords) {
+      expression = `
+        (() => {
+          let el = document.elementFromPoint(${coords.x}, ${coords.y});
+          // Walk up to find nearest table
+          while (el && el.tagName !== 'TABLE') el = el.parentElement;
+          if (!el) {
+            // Fallback: find closest table in DOM
+            const allTables = document.querySelectorAll('table');
+            el = allTables.length > 0 ? allTables[0] : null;
+          }
+          return el ? el.outerHTML : null;
+        })()
+      `;
+    } else {
+      expression = `
+        (() => {
+          const t = document.querySelector('table');
+          return t ? t.outerHTML : null;
+        })()
+      `;
+    }
+  } else {
+    expression = `
+      (() => {
+        const t = document.querySelector('table');
+        return t ? t.outerHTML : null;
+      })()
+    `;
+  }
+
+  const result = await sendCommand("Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+  });
+  const tableHtml = result.result.value;
+  if (!tableHtml) return JSON.stringify({ error: "No table found on page" });
+
+  try {
+    const resp = await fetch(`${API_BASE_ACTIONS}/scrape/table`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html: tableHtml }),
+    });
+    const data = await resp.json();
+    return JSON.stringify(data, null, 2);
+  } catch (err) {
+    return JSON.stringify({ error: `Table scrape failed: ${err.message}` });
+  }
+}
+
+async function cdpScrapeLinks() {
+  // Extract all links from page — runs entirely in page context
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: `
+      (() => {
+        const seen = new Set();
+        const links = [];
+        const baseUrl = document.baseURI || location.href;
+        for (const a of document.querySelectorAll('a[href]')) {
+          const href = a.href;
+          if (!href || href.startsWith('javascript:') || href === '#' || seen.has(href)) continue;
+          seen.add(href);
+          const text = (a.innerText || a.textContent || '').trim().substring(0, 100);
+          if (!text) continue;
+          // Get context from parent paragraph/list item
+          const parent = a.closest('p, li, td, div, span');
+          const context = parent
+            ? (parent.innerText || '').trim().substring(0, 150)
+            : '';
+          links.push({ text, href, context });
+          if (links.length >= 200) break;
+        }
+        return JSON.stringify({
+          links,
+          count: links.length,
+          truncated: document.querySelectorAll('a[href]').length > 200,
+        });
+      })()
+    `,
+    returnByValue: true,
+  });
+  return result.result.value || JSON.stringify({ links: [], count: 0 });
+}
+
+async function cdpScrapeMetadata() {
+  // Extract page metadata — runs entirely in page context
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: `
+      (() => {
+        const meta = {};
+        const getMeta = (sel, attr = 'content') => {
+          const el = document.querySelector(sel);
+          return el ? (el.getAttribute(attr) || '').trim() : '';
+        };
+
+        meta.title = document.title || '';
+        meta.description = getMeta('meta[name="description"]');
+        meta.author = getMeta('meta[name="author"]');
+        meta.robots = getMeta('meta[name="robots"]');
+
+        // Open Graph (Firecrawl-style comprehensive extraction)
+        meta.og_title = getMeta('meta[property="og:title"]');
+        meta.og_description = getMeta('meta[property="og:description"]');
+        meta.og_image = getMeta('meta[property="og:image"]');
+        meta.og_url = getMeta('meta[property="og:url"]');
+        meta.og_type = getMeta('meta[property="og:type"]');
+        meta.og_site_name = getMeta('meta[property="og:site_name"]');
+
+        // Article metadata
+        meta.published_time = getMeta('meta[property="article:published_time"]')
+          || getMeta('meta[name="date"]')
+          || getMeta('time[datetime]', 'datetime');
+        meta.modified_time = getMeta('meta[property="article:modified_time"]');
+
+        // Technical
+        meta.canonical = getMeta('link[rel="canonical"]', 'href');
+        meta.language = document.documentElement.lang || getMeta('meta[http-equiv="content-language"]');
+        meta.favicon = getMeta('link[rel="icon"]', 'href')
+          || getMeta('link[rel="shortcut icon"]', 'href');
+
+        // Title fallback chain (like Firecrawl)
+        if (!meta.title) {
+          meta.title = meta.og_title
+            || getMeta('meta[name="twitter:title"]')
+            || getMeta('meta[name="title"]')
+            || '';
+        }
+
+        // Remove empty fields
+        for (const key of Object.keys(meta)) {
+          if (!meta[key]) delete meta[key];
+        }
+
+        return JSON.stringify(meta);
+      })()
+    `,
+    returnByValue: true,
+  });
+  return result.result.value || JSON.stringify({});
+}
+
+async function cdpScrapeNetwork() {
+  // Retrieve captured JSON API responses
+  const results = [];
+  let totalSize = 0;
+  const MAX_TOTAL = 10000;
+  const MAX_PER_BODY = 3000;
+
+  for (const entry of capturedNetworkJson) {
+    if (totalSize > MAX_TOTAL) break;
+    try {
+      const bodyResult = await sendCommand("Network.getResponseBody", {
+        requestId: entry.requestId,
+      });
+      let body = bodyResult.body || "";
+      if (body.length > MAX_PER_BODY) {
+        body = body.substring(0, MAX_PER_BODY) + "... [truncated]";
+      }
+      results.push({
+        url: entry.url,
+        status: entry.status,
+        body,
+      });
+      totalSize += body.length;
+    } catch (_) {
+      // Body may have been discarded by Chrome
+      results.push({
+        url: entry.url,
+        status: entry.status,
+        body: "(body unavailable)",
+      });
+    }
+  }
+
+  return JSON.stringify({
+    requests: results,
+    count: results.length,
+    totalCaptured: capturedNetworkJson.length,
+  }, null, 2);
+}
+
 
 async function cdpSelectOption(ref, value) {
   // Use Runtime.evaluate to set the select value and dispatch change event
@@ -1025,11 +1287,43 @@ async function executeAction(tabId, action) {
       if (c) {
         await cdpClick(c.x, c.y);
         await sleep(100); // Minimal wait for focus
-        if (action.clear) {
+
+        // Default: always clear unless explicitly set to false
+        // This prevents text appending to existing content
+        const shouldClear = action.clear !== false;
+        if (shouldClear) {
           await cdpSelectAll();
           await cdpKey("Backspace");
+          await sleep(50);
         }
         await cdpType(action.text);
+
+        // Auto-submit: press Enter after typing if requested (like Gemini's press_enter)
+        if (action.submit) {
+          await sleep(50);
+          await cdpKey("Enter");
+        }
+
+        // Read back the value to verify what's actually in the field
+        await sleep(50);
+        try {
+          const readback = await sendCommand("Runtime.evaluate", {
+            expression: `(() => {
+              const el = document.activeElement;
+              return el ? (el.value || el.innerText || '').substring(0, 200) : '';
+            })()`,
+            returnByValue: true,
+          });
+          const actualValue = readback.result.value || "";
+          action._inputVerification = {
+            intended: action.text,
+            actual: actualValue,
+            match: actualValue.includes(action.text),
+          };
+          if (!actualValue.includes(action.text)) {
+            console.warn(`Input mismatch: intended="${action.text}" actual="${actualValue}"`);
+          }
+        } catch (_) {}
       }
       break;
     }
@@ -1043,6 +1337,45 @@ async function executeAction(tabId, action) {
     case "key":
       await cdpKey(action.key);
       break;
+
+    case "key_combo": {
+      // Key combination support (e.g., "Control+a", "Control+c", "Shift+Tab")
+      const keys = (action.keys || "").split("+").map(k => k.trim());
+      if (keys.length >= 2) {
+        const modifiers = [];
+        let mainKey = keys[keys.length - 1]; // Last key is the main key
+
+        for (let i = 0; i < keys.length - 1; i++) {
+          const mod = keys[i].toLowerCase();
+          if (mod === "control" || mod === "ctrl") modifiers.push("control");
+          else if (mod === "shift") modifiers.push("shift");
+          else if (mod === "alt") modifiers.push("alt");
+          else if (mod === "meta" || mod === "command" || mod === "cmd") modifiers.push("meta");
+        }
+
+        // Map key names to CDP key codes
+        const keyMap = {
+          a: { key: "a", code: "KeyA" }, c: { key: "c", code: "KeyC" },
+          v: { key: "v", code: "KeyV" }, x: { key: "x", code: "KeyX" },
+          z: { key: "z", code: "KeyZ" }, tab: { key: "Tab", code: "Tab" },
+          enter: { key: "Enter", code: "Enter" },
+        };
+
+        const mapped = keyMap[mainKey.toLowerCase()] || { key: mainKey, code: `Key${mainKey.toUpperCase()}` };
+        const modBitmask = (modifiers.includes("alt") ? 1 : 0) |
+                           (modifiers.includes("control") ? 2 : 0) |
+                           (modifiers.includes("meta") ? 4 : 0) |
+                           (modifiers.includes("shift") ? 8 : 0);
+
+        await sendCommand("Input.dispatchKeyEvent", {
+          type: "keyDown", key: mapped.key, code: mapped.code, modifiers: modBitmask,
+        });
+        await sendCommand("Input.dispatchKeyEvent", {
+          type: "keyUp", key: mapped.key, code: mapped.code, modifiers: modBitmask,
+        });
+      }
+      break;
+    }
 
     case "select":
       await cdpSelectOption(action.ref, action.value);
@@ -1086,8 +1419,157 @@ async function executeAction(tabId, action) {
     case "extract_text": {
       const text = await cdpExtractText(action.ref);
       action._extractedText = text;
+      action._scrapedData = text;  // Also expose via unified scrape interface
       break;
     }
+
+    // ── Fill Cells (Spreadsheet data entry) ──
+    case "fill_cells": {
+      const startCell = action.startCell || "A1";
+      const values = action.values || [];
+      const direction = action.direction || "down"; // "down" = Enter, "right" = Tab
+      const advanceKey = direction === "right" ? "Tab" : "Enter";
+
+      if (values.length === 0) break;
+
+      // Step 1: Navigate to start cell using Name Box
+      // The Name Box is typically the first input-like element at the top-left
+      // In Google Sheets, we use keyboard shortcut Ctrl+G or click the Name Box
+      // Safest: use the Name Box — click it, type cell ref, press Enter
+      try {
+        // Navigate to start cell using the Name Box
+        // Strategy: try DOM selectors first, then fall back to fixed coordinates
+        const nameBoxResult = await sendCommand("Runtime.evaluate", {
+          expression: `
+            (() => {
+              // Google Sheets Name Box — try multiple selectors
+              const selectors = [
+                'input[aria-label="Name Box"]',
+                'input.jfk-textinput',
+                '#A2\\\\:R1',
+                '[data-tooltip="Name box"]',
+                'input[maxlength]',
+              ];
+              for (const sel of selectors) {
+                try {
+                  const el = document.querySelector(sel);
+                  if (el && el.tagName === 'INPUT') {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 20 && rect.width < 200 && rect.y < 200) {
+                      return JSON.stringify({ x: rect.x + rect.width/2, y: rect.y + rect.height/2, found: true, selector: sel });
+                    }
+                  }
+                } catch(_) {}
+              }
+              // Fallback: scan all small inputs near top-left
+              for (const inp of document.querySelectorAll('input')) {
+                const r = inp.getBoundingClientRect();
+                if (r.y < 180 && r.x < 150 && r.width > 30 && r.width < 200) {
+                  return JSON.stringify({ x: r.x + r.width/2, y: r.y + r.height/2, found: true, selector: 'scan' });
+                }
+              }
+              return JSON.stringify({ found: false });
+            })()
+          `,
+          returnByValue: true,
+        });
+        const nameBox = JSON.parse(nameBoxResult.result.value);
+
+        if (nameBox.found) {
+          console.log(`Name Box found via: ${nameBox.selector} at (${nameBox.x}, ${nameBox.y})`);
+          await cdpClick(nameBox.x, nameBox.y);
+          await sleep(150);
+          await cdpSelectAll();
+          await cdpKey("Backspace");
+          await sleep(50);
+          // Type cell reference WITHOUT \n — we press Enter separately
+          for (const ch of startCell) {
+            await sendCommand("Input.dispatchKeyEvent", { type: "keyDown", text: ch, key: ch, unmodifiedText: ch });
+            await sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: ch });
+            await sleep(20);
+          }
+          await sleep(50);
+          await cdpKey("Enter");
+          await sleep(300); // Wait for cell navigation
+        } else {
+          // Last resort: click at fixed Name Box coordinates (typical Sheets position)
+          console.log("Name Box not found via DOM — using fixed coordinates (55, 148)");
+          await cdpClick(55, 148);
+          await sleep(150);
+          await cdpSelectAll();
+          await cdpKey("Backspace");
+          await sleep(50);
+          for (const ch of startCell) {
+            await sendCommand("Input.dispatchKeyEvent", { type: "keyDown", text: ch, key: ch, unmodifiedText: ch });
+            await sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: ch });
+            await sleep(20);
+          }
+          await sleep(50);
+          await cdpKey("Enter");
+          await sleep(300);
+        }
+
+        // Step 2: Enter values one by one with Enter/Tab between them
+        let enteredCount = 0;
+        for (const value of values) {
+          await cdpType(value);
+          await sleep(50);
+          await cdpKey(advanceKey); // Enter moves down, Tab moves right
+          await sleep(100);
+          enteredCount++;
+        }
+
+        action._fillResult = {
+          startCell,
+          count: enteredCount,
+          direction,
+          values,
+        };
+        console.log(`fill_cells: entered ${enteredCount} values starting at ${startCell}`);
+
+      } catch (err) {
+        console.error("fill_cells failed:", err);
+        action._fillResult = { error: err.message };
+      }
+      break;
+    }
+
+    // ── Scraping Actions ──
+    case "scrape_page": {
+      const data = await cdpScrapePageHtml();
+      action._scrapedData = data;
+      break;
+    }
+
+    case "scrape_table": {
+      const data = await cdpScrapeTableHtml(action.ref);
+      action._scrapedData = data;
+      break;
+    }
+
+    case "scrape_links": {
+      const data = await cdpScrapeLinks();
+      action._scrapedData = data;
+      break;
+    }
+
+    case "scrape_metadata": {
+      const data = await cdpScrapeMetadata();
+      action._scrapedData = data;
+      break;
+    }
+
+    case "scrape_network": {
+      const data = await cdpScrapeNetwork();
+      action._scrapedData = data;
+      break;
+    }
+
+    // ── Memory Actions (handled by backend, extension just passes through) ──
+    case "store":
+    case "recall":
+      // These are handled server-side. No CDP action needed.
+      break;
 
     case "dismiss_popup": {
       const result = await cdpDismissPopup();
