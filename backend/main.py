@@ -591,7 +591,31 @@ async def step_session(session_id: str, req: StepRequest):
         print(f"  [screenshot: {'yes' if has_screenshot else 'no'}]")
         print(f"{'─'*60}")
 
-        contents = list(session["history"])
+        # ── Build context: sliding window of last 6 turns ──
+        # Strip screenshots from older history to keep token count low.
+        # Only the current step gets a screenshot. Older turns keep text only.
+        MAX_HISTORY_TURNS = 6  # 6 turns = 12 Content objects (user + model)
+        history = session["history"]
+
+        # Trim to last N turns
+        if len(history) > MAX_HISTORY_TURNS * 2:
+            history = history[-(MAX_HISTORY_TURNS * 2):]
+            session["history"] = history
+
+        # Strip image parts from all history entries (keep only text)
+        contents = []
+        for msg in history:
+            stripped_parts = []
+            for part in msg.parts:
+                # Keep text parts, drop image/bytes parts from old turns
+                if hasattr(part, "text") and part.text:
+                    stripped_parts.append(Part.from_text(text=part.text))
+                elif hasattr(part, "thought") and part.thought:
+                    continue  # Skip thinking parts
+            if stripped_parts:
+                contents.append(Content(role=msg.role, parts=stripped_parts))
+
+        # Current step gets full parts (including screenshot if present)
         contents.append(Content(role="user", parts=user_parts))
 
         response = client.models.generate_content(
