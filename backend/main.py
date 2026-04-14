@@ -35,10 +35,10 @@ You are an autonomous browser automation agent. You take one action per step to 
 </role>
 
 <instructions>
-1) Analyze the element list to understand the page. Elements are grouped by section and tell you what's clickable, typeable, etc.
-2) If the element list is sufficient to decide your next action, act immediately. Do NOT request a screenshot unless you actually need visual information.
-3) Request a screenshot ({"type":"screenshot"}) ONLY when: you can't find the right element, the page looks wrong, you need to read visual content, solve a CAPTCHA, or verify a complex layout.
-4) Use previous context: if you already saw a page layout, you don't need to see it again. The element list updates every step.
+1) Before starting a complex or ambiguous task, use ask_user to clarify. E.g., "Should I book the cheapest option or do you have a preference?" Don't assume — ask.
+2) Analyze the element list to understand the page. Elements are grouped by section. PAGE SCROLL tells you where you are on the page.
+3) Act from the element list. Do NOT request a screenshot unless you need visual info (CAPTCHA, complex layout, can't find element).
+4) Use previous context: if you saw a layout before, you know it. The element list updates every step.
 5) Adapt: if an action fails, try a different approach. Do not repeat failed actions.
 6) Persist: on transient errors, use wait and retry. Only use done when all approaches exhausted.
 </instructions>
@@ -107,6 +107,7 @@ class StepRequest(BaseModel):
     agent_tabs: list[dict] | None = None
     loop_warning: str | None = None
     is_canvas_heavy: bool = False
+    page_scroll: dict | None = None
 
 
 @app.post("/session/start")
@@ -500,6 +501,21 @@ async def step_session(session_id: str, req: StepRequest):
         tabs_text = _format_agent_tabs(req.agent_tabs)
         loop_text = f"\n⚠ {req.loop_warning}" if req.loop_warning else ""
 
+        # Page scroll position context
+        ps = req.page_scroll
+        if ps:
+            dirs = []
+            if ps.get("canScrollUp"):
+                dirs.append("up")
+            if ps.get("canScrollDown"):
+                dirs.append("down")
+            scroll_pos_text = (
+                f"\nPAGE SCROLL: {ps.get('scrollPct', 0)}% "
+                f"(can scroll: {', '.join(dirs) if dirs else 'none'})"
+            )
+        else:
+            scroll_pos_text = ""
+
         # ── Page context: detect URL change ──
         current_url = req.url or ""
         last_url = session.get("last_url", "")
@@ -524,6 +540,7 @@ async def step_session(session_id: str, req: StepRequest):
         prompt_text = (
             f"Task: {session['task']}\n"
             f"Step {step_num} | {page_marker}"
+            f"{scroll_pos_text}\n"
             f"{loop_text}\n"
             f"{popup_text}\n"
             f"{captcha_text}\n"

@@ -335,11 +335,11 @@ async function captureState(needsScreenshot = true) {
     getAgentTabs(),
   ]);
 
-  let { elements, scrollContainers, popup, captcha, isCanvasHeavy } = elemData;
+  let { elements, scrollContainers, popup, captcha, isCanvasHeavy, pageScroll } = elemData;
   if (elements && elements.length > 200) elements = elements.slice(0, 200);
 
   const dialog = typeof getPendingDialog === "function" ? getPendingDialog() : null;
-  return { screenshot: screenshotResult, elements, scrollContainers, popup, captcha, dialog, isCanvasHeavy, agentTabs };
+  return { screenshot: screenshotResult, elements, scrollContainers, popup, captcha, dialog, isCanvasHeavy, agentTabs, pageScroll };
 }
 
 // ── Tab Action Executor ─────────────────────────────────────
@@ -425,6 +425,7 @@ async function runAgent(task) {
         dialog: state.dialog,
         is_canvas_heavy: state.isCanvasHeavy,
         agent_tabs: state.agentTabs,
+        page_scroll: state.pageScroll,
       };
       // Always send the screenshot data — backend decides whether to include it
       if (state.screenshot.base64) {

@@ -551,6 +551,12 @@ const EXTRACT_ELEMENTS_SCRIPT = `
   const viewportArea = window.innerWidth * window.innerHeight;
   const isCanvasHeavy = canvasArea > viewportArea * 0.5;
 
+  // Page scroll position
+  const docHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+  const viewHeight = window.innerHeight;
+  const scrollTop = window.scrollY || document.documentElement.scrollTop;
+  const scrollPct = docHeight > viewHeight ? Math.round(scrollTop / (docHeight - viewHeight) * 100) : 0;
+
   return JSON.stringify({
     elements,
     scrollContainers,
@@ -558,7 +564,14 @@ const EXTRACT_ELEMENTS_SCRIPT = `
     captcha,
     iframes: iframes.length > 0 ? iframes : undefined,
     isCanvasHeavy,
-    viewport: { width: window.innerWidth, height: window.innerHeight }
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    pageScroll: {
+      scrollTop: Math.round(scrollTop),
+      scrollPct,
+      docHeight: Math.round(docHeight),
+      canScrollDown: scrollTop + viewHeight < docHeight - 10,
+      canScrollUp: scrollTop > 10,
+    }
   });
 })()
 `;
@@ -1030,14 +1043,28 @@ async function executeAction(tabId, action) {
       await cdpSelectOption(action.ref, action.value);
       break;
 
-    case "scroll":
-      await cdpScroll(
-        action.x || 400,
-        action.y || 400,
-        action.deltaX || 0,
-        action.deltaY || 0
-      );
+    case "scroll": {
+      // If model sends (0,0) or no coordinates, scroll at viewport center
+      let sx = action.x;
+      let sy = action.y;
+      if ((!sx && !sy) || (sx === 0 && sy === 0)) {
+        // Get viewport size and use center
+        try {
+          const vpResult = await sendCommand("Runtime.evaluate", {
+            expression: "JSON.stringify({w: window.innerWidth, h: window.innerHeight})",
+            returnByValue: true,
+          });
+          const vp = JSON.parse(vpResult.result.value);
+          sx = Math.round(vp.w / 2);
+          sy = Math.round(vp.h / 2);
+        } catch (_) {
+          sx = 640;
+          sy = 400;
+        }
+      }
+      await cdpScroll(sx, sy, action.deltaX || 0, action.deltaY || 0);
       break;
+    }
 
     case "navigate":
       await cdpNavigate(action.url);
