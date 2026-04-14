@@ -179,23 +179,22 @@ function getActiveAgentTabId() {
 // ── Popup / New Tab Detection ───────────────────────────────
 
 let popupListener = null;
+let tabRemovedListener = null;
 
 /**
  * Start listening for new tabs/popups that open during the agent session.
- * Automatically adds them to the agent group (OAuth popups, email windows, etc.).
+ * Also listens for tab closures (OAuth popup completing, page JS closing tabs).
  */
 function startPopupDetection() {
   if (popupListener) return;
 
+  // Detect new tabs opening (OAuth popups, email windows, etc.)
   popupListener = async (tab) => {
-    // Only track tabs that open while agent is running
     if (!agentGroupId || agentTabIds.size >= MAX_AGENT_TABS) return;
 
-    // Add to tracking
     agentTabIds.add(tab.id);
     activeAgentTabId = tab.id;
 
-    // Add to agent group
     try {
       await chrome.tabs.group({ tabIds: [tab.id], groupId: agentGroupId });
     } catch (_) {}
@@ -203,15 +202,37 @@ function startPopupDetection() {
     console.log(`Popup/new tab detected: ${tab.id} (${tab.pendingUrl || tab.url || "loading..."})`);
   };
 
+  // Detect tabs closing (OAuth completing, page JS closing popup)
+  tabRemovedListener = (tabId) => {
+    if (!agentTabIds.has(tabId)) return;
+
+    console.log(`Agent tab closed: ${tabId}${tabId === activeAgentTabId ? " (was active)" : ""}`);
+    agentTabIds.delete(tabId);
+
+    // If the active tab was closed, switch back to original tab
+    if (tabId === activeAgentTabId) {
+      activeAgentTabId = originalTabId;
+      // Activate the original tab so next captureState finds it
+      if (originalTabId) {
+        chrome.tabs.update(originalTabId, { active: true }).catch(() => {});
+      }
+    }
+  };
+
   chrome.tabs.onCreated.addListener(popupListener);
+  chrome.tabs.onRemoved.addListener(tabRemovedListener);
 }
 
 /**
- * Stop listening for new tabs.
+ * Stop listening for tab changes.
  */
 function stopPopupDetection() {
   if (popupListener) {
     chrome.tabs.onCreated.removeListener(popupListener);
     popupListener = null;
+  }
+  if (tabRemovedListener) {
+    chrome.tabs.onRemoved.removeListener(tabRemovedListener);
+    tabRemovedListener = null;
   }
 }

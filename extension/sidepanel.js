@@ -242,15 +242,31 @@ function detectLoop(actionHistory) {
 // ── Screenshot + Elements ───────────────────────────────────
 
 async function resolveAgentTab() {
+  // Try the currently tracked active tab
   const tabId = getActiveAgentTabId();
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       return await chrome.tabs.get(tabId);
     } catch (e) {
-      if (attempt < 2) await sleep(300); // Short retry — tab may be mid-navigation
+      if (attempt < 2) await sleep(300);
     }
   }
-  // Fallback: active tab in current window
+
+  // Active tab gone — try other known agent tabs
+  for (const id of agentTabIds) {
+    if (id === tabId) continue;
+    try {
+      const tab = await chrome.tabs.get(id);
+      activeAgentTabId = tab.id;
+      await chrome.tabs.update(tab.id, { active: true });
+      console.log(`Switched to surviving agent tab: ${tab.id} (${tab.url})`);
+      return tab;
+    } catch (_) {
+      agentTabIds.delete(id); // This one's dead too
+    }
+  }
+
+  // Last resort: find any tab in current window
   const allTabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (allTabs.length > 0) {
     const tab = allTabs[0];
