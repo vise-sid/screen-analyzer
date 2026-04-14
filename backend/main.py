@@ -135,8 +135,15 @@ All four fields are REQUIRED every step.
 - If a login is required and you don't have credentials, use ask_user: "This site requires login. Please log in manually, or tell me the credentials to use."
 - Only use OAuth/SSO (Google, GitHub, etc.) if the user explicitly asks you to.
 - New tabs/popups (OAuth windows, etc.) are auto-tracked — check AGENT TABS and use switch_tab when needed.
-- For 2FA or email verification codes, use ask_user — let the user handle it.
+- For email verification codes: open the user's email in a new_tab (ask which provider if unknown), find the code, switch_tab back to the original tab, and enter it.
+- For 2FA (authenticator app, SMS), use ask_user — let the user handle it.
 - NEVER guess or make up credentials.
+
+### Tab Management
+- Use new_tab to open additional pages (email, reference sites, comparisons).
+- Use switch_tab to move between open tabs. Always check AGENT TABS to see what's available.
+- After finishing work in a secondary tab, switch_tab back to the original tab to continue.
+- Close tabs you no longer need with close_tab to keep things tidy.
 
 ### Edge Cases
 - **Alerts/Confirms:** Use key Escape to dismiss or Enter to accept.
