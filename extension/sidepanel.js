@@ -242,57 +242,44 @@ function detectLoop(actionHistory) {
 // ── Screenshot + Elements ───────────────────────────────────
 
 async function resolveAgentTab() {
-  // Try the tracked active tab first, with retries for transient navigation errors
   const tabId = getActiveAgentTabId();
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const tab = await chrome.tabs.get(tabId);
-      return tab;
+      return await chrome.tabs.get(tabId);
     } catch (e) {
-      if (attempt < 2) {
-        await sleep(1000); // Tab may be mid-navigation, wait and retry
-      }
+      if (attempt < 2) await sleep(300); // Short retry — tab may be mid-navigation
     }
   }
-
-  // Fallback: find any tab still in the agent group
-  console.warn(`Tab ${tabId} unavailable, searching for active agent tab...`);
+  // Fallback: active tab in current window
   const allTabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (allTabs.length > 0) {
-    const fallback = allTabs[0];
-    // Update the tab manager to track this tab
-    agentTabIds.add(fallback.id);
-    activeAgentTabId = fallback.id;
-    console.log(`Recovered to tab ${fallback.id}: ${fallback.url}`);
-    return fallback;
+    const tab = allTabs[0];
+    agentTabIds.add(tab.id);
+    activeAgentTabId = tab.id;
+    return tab;
   }
-
   throw new Error("No available agent tab found");
 }
 
-async function captureScreenshot() {
-  const tab = await resolveAgentTab();
-
-  // Make sure the agent tab is the visible one
+async function captureScreenshot(tab) {
+  // Tab passed in — no duplicate resolveAgentTab call
   if (!tab.active) {
     await chrome.tabs.update(tab.id, { active: true });
-    await sleep(300);
+    await sleep(150);
   }
 
-  // Retry screenshot capture (fails during page transitions/reloads)
+  // JPEG at 60% quality — 3-5x smaller than PNG, faster to send
   let dataUrl = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-        format: "png",
+        format: "jpeg",
+        quality: 60,
       });
       break;
     } catch (e) {
-      if (attempt < 2) {
-        await sleep(1000); // Wait for page to settle
-      } else {
-        throw e;
-      }
+      if (attempt < 2) await sleep(300); // Short retry
+      else throw e;
     }
   }
 
@@ -305,11 +292,10 @@ async function captureScreenshot() {
 }
 
 async function captureState(needsScreenshot = true) {
-  // Resolve agent tab with retries (handles mid-navigation states)
   const tab = await resolveAgentTab();
   if (!tab.active) {
     await chrome.tabs.update(tab.id, { active: true });
-    await sleep(300);
+    await sleep(150);
   }
 
   // Wait for page to be ready before capturing (replaces hardcoded post-action sleeps)
@@ -318,39 +304,26 @@ async function captureState(needsScreenshot = true) {
   } catch (_) {}
 
   let screenshot = { base64: null, tabId: tab.id, width: tab.width, height: tab.height };
-  if (needsScreenshot) {
-    try {
-      screenshot = await captureScreenshot();
-    } catch (e) {
-      console.warn("Screenshot failed, continuing without:", e);
-    }
-  }
+  // Run screenshot + element extraction + tab list in PARALLEL
+  const [screenshotResult, elemData, agentTabs] = await Promise.all([
+    needsScreenshot
+      ? captureScreenshot(tab).catch(e => {
+          console.warn("Screenshot failed:", e);
+          return { base64: null, tabId: tab.id, width: tab.width, height: tab.height };
+        })
+      : Promise.resolve({ base64: null, tabId: tab.id, width: tab.width, height: tab.height }),
+    extractElements(tab.id).catch(err => {
+      console.warn("Element extraction failed:", err);
+      return { elements: null, scrollContainers: null, popup: null, captcha: null, isCanvasHeavy: false };
+    }),
+    getAgentTabs(),
+  ]);
 
-  let elements = null;
-  let scrollContainers = null;
-  let popup = null;
-  let captcha = null;
-  let isCanvasHeavy = false;
-  try {
-    const data = await extractElements(screenshot.tabId || tab.id);
-    elements = data.elements;
-    scrollContainers = data.scrollContainers;
-    popup = data.popup;
-    captcha = data.captcha;
-    isCanvasHeavy = data.isCanvasHeavy;
+  let { elements, scrollContainers, popup, captcha, isCanvasHeavy } = elemData;
+  if (elements && elements.length > 200) elements = elements.slice(0, 200);
 
-    // Cap elements to keep prompt size manageable
-    if (elements && elements.length > 200) {
-      elements = elements.slice(0, 200);
-    }
-  } catch (err) {
-    console.warn("Element extraction failed, using vision-only mode:", err);
-  }
-
-  const agentTabs = await getAgentTabs();
   const dialog = typeof getPendingDialog === "function" ? getPendingDialog() : null;
-
-  return { screenshot, elements, scrollContainers, popup, captcha, dialog, isCanvasHeavy, agentTabs };
+  return { screenshot: screenshotResult, elements, scrollContainers, popup, captcha, dialog, isCanvasHeavy, agentTabs };
 }
 
 // ── Tab Action Executor ─────────────────────────────────────
@@ -399,7 +372,8 @@ async function runAgent(task) {
     startPopupDetection();
 
     // Get initial viewport info
-    const initial = await captureScreenshot();
+    const initialTab = await resolveAgentTab();
+    const initial = await captureScreenshot(initialTab);
 
     // Start session
     const startRes = await fetch(`${API_BASE}/session/start`, {
