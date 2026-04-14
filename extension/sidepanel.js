@@ -10,6 +10,7 @@ const placeholder = document.getElementById("placeholder");
 
 let sessionId = null;
 let running = false;
+let currentAbortController = null; // For killing stuck requests
 
 // ── UI Helpers ──────────────────────────────────────────────
 
@@ -387,14 +388,33 @@ async function runAgent(task) {
 
       const loadingEl = addLoading();
 
-      const stepRes = await fetch(
-        `${API_BASE}/session/${sessionId}/step`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(requestBody),
+      // Fetch with 30s timeout + abort support for kill button
+      currentAbortController = new AbortController();
+      const timeoutId = setTimeout(() => currentAbortController.abort(), 30000);
+
+      let stepRes;
+      try {
+        stepRes = await fetch(
+          `${API_BASE}/session/${sessionId}/step`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(requestBody),
+            signal: currentAbortController.signal,
+          }
+        );
+      } catch (fetchErr) {
+        clearTimeout(timeoutId);
+        loadingEl.remove();
+        currentAbortController = null;
+        if (fetchErr.name === "AbortError") {
+          addLog("Step killed — retrying...", "log-error");
+          continue; // Retry the step
         }
-      );
+        throw fetchErr;
+      }
+      clearTimeout(timeoutId);
+      currentAbortController = null;
 
       loadingEl.remove();
 
@@ -522,7 +542,19 @@ taskInput.addEventListener("keydown", (e) => {
 });
 
 stopBtn.addEventListener("click", () => {
+  // Kill current request if stuck, or stop entirely on second click
+  if (currentAbortController) {
+    currentAbortController.abort();
+    // Don't set running=false — let it retry the step
+  } else {
+    running = false;
+  }
+});
+
+// Double-click stop to force quit
+stopBtn.addEventListener("dblclick", () => {
   running = false;
+  if (currentAbortController) currentAbortController.abort();
 });
 
 newChatBtn.addEventListener("click", () => {
