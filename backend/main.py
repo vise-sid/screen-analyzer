@@ -47,6 +47,8 @@ You are an autonomous browser automation agent. You take one action per step to 
 Respond with a single JSON object. No markdown, no code fences, no text outside the JSON.
 
 {"thought": "brief reasoning", "action": {"type": "...", ...}}
+
+Your previous thoughts and actions are included in the conversation — use them as context.
 </response_format>
 
 <actions>
@@ -120,9 +122,10 @@ async def start_session(req: StartRequest):
         "task": req.task,
         "viewport_width": req.viewport_width,
         "viewport_height": req.viewport_height,
-        "history": [],
-        "last_url": "",         # Track URL for page-change detection
-        "wants_screenshot": True,  # First step always gets a screenshot
+        "model_outputs": [],    # Model's thought+action from each step (lightweight)
+        "last_url": "",
+        "wants_screenshot": True,
+        "step_count": 0,
     }
     return {"session_id": session_id}
 
@@ -494,7 +497,8 @@ async def step_session(session_id: str, req: StepRequest):
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        step_num = len(session["history"]) // 2 + 1
+        session["step_count"] += 1
+        step_num = session["step_count"]
 
         elements_text = _format_elements(req.elements, req.is_canvas_heavy)
         scroll_text = _format_scroll_containers(req.scroll_containers)
@@ -591,31 +595,13 @@ async def step_session(session_id: str, req: StepRequest):
         print(f"  [screenshot: {'yes' if has_screenshot else 'no'}]")
         print(f"{'─'*60}")
 
-        # ── Build context: sliding window of last 6 turns ──
-        # Strip screenshots from older history to keep token count low.
-        # Only the current step gets a screenshot. Older turns keep text only.
-        MAX_HISTORY_TURNS = 6  # 6 turns = 12 Content objects (user + model)
-        history = session["history"]
-
-        # Trim to last N turns
-        if len(history) > MAX_HISTORY_TURNS * 2:
-            history = history[-(MAX_HISTORY_TURNS * 2):]
-            session["history"] = history
-
-        # Strip image parts from all history entries (keep only text)
+        # ── Build context: model outputs from previous steps + current full input ──
+        # Previous turns: minimal user marker + full model output (thought + action)
+        # Current turn: full user input (task + elements + optional screenshot)
         contents = []
-        for msg in history:
-            stripped_parts = []
-            for part in msg.parts:
-                # Keep text parts, drop image/bytes parts from old turns
-                if hasattr(part, "text") and part.text:
-                    stripped_parts.append(Part.from_text(text=part.text))
-                elif hasattr(part, "thought") and part.thought:
-                    continue  # Skip thinking parts
-            if stripped_parts:
-                contents.append(Content(role=msg.role, parts=stripped_parts))
-
-        # Current step gets full parts (including screenshot if present)
+        for prev_output in session["model_outputs"]:
+            contents.append(Content(role="user", parts=[Part.from_text(text="Continue.")]))
+            contents.append(Content(role="model", parts=[Part.from_text(text=prev_output)]))
         contents.append(Content(role="user", parts=user_parts))
 
         response = client.models.generate_content(
@@ -647,14 +633,12 @@ async def step_session(session_id: str, req: StepRequest):
         print(f"  {json.dumps(result, indent=2)}")
         print(f"{'='*60}\n")
 
-        # Save to history
-        session["history"].append(Content(role="user", parts=user_parts))
-        session["history"].append(
-            Content(
-                role="model",
-                parts=[Part.from_text(text=json.dumps(result))],
-            )
-        )
+        # Append model's output to history (lightweight: just thought + action JSON)
+        session["model_outputs"].append(json.dumps(result))
+
+        # Cap history at 15 outputs to prevent unbounded growth
+        if len(session["model_outputs"]) > 15:
+            session["model_outputs"] = session["model_outputs"][-15:]
 
         return result
 
@@ -668,15 +652,7 @@ async def step_session(session_id: str, req: StepRequest):
         # Try to extract action type from raw text as last resort
         action = _guess_action_from_raw(raw)
         if action:
-            result = {"thought": f"(Recovered from malformed JSON)", "action": action}
-            session["history"].append(Content(role="user", parts=user_parts))
-            session["history"].append(
-                Content(
-                    role="model",
-                    parts=[Part.from_text(text=json.dumps(result))],
-                )
-            )
-            return result
+            return {"thought": "(Recovered from malformed JSON)", "action": action}
 
         return {
             "thought": f"Failed to parse response. Raw: {raw[:200]}",

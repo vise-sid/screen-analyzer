@@ -417,9 +417,11 @@ async function runAgent(task) {
       const state = await captureState(true);
       const tCapture = performance.now();
 
+      // Get FRESH tab info for URL (after page load, not cached)
       const tab = await resolveAgentTab();
+      const freshTab = await chrome.tabs.get(tab.id);
       const requestBody = {
-        url: tab.url || "",
+        url: freshTab.url || "",
         elements: state.elements,
         scroll_containers: state.scrollContainers,
         popup: state.popup,
