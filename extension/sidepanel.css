@@ -43,11 +43,6 @@ body {
 .logo img {
   width: 30px; height: 30px;
   image-rendering: pixelated;
-  animation: foxBounce 2s ease-in-out infinite;
-}
-@keyframes foxBounce {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-3px); }
 }
 
 .header-title {
