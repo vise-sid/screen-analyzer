@@ -279,18 +279,7 @@ body {
   color: var(--text-muted);
   font-size: 13px;
 }
-.animated-emoji {
-  width: 20px;
-  height: 20px;
-  vertical-align: middle;
-  display: inline-block;
-}
-.animated-emoji-lg {
-  width: 28px;
-  height: 28px;
-  vertical-align: middle;
-  display: inline-block;
-}
+.action-icon { font-size: 16px; }
 
 /* ═══ FOOTER ═══ */
 .footer {
