@@ -411,8 +411,11 @@ async function runAgent(task) {
     let consecutiveFailures = 0;
     let killRetries = 0;
     for (let step = 0; step < MAX_STEPS && running; step++) {
-      // Always capture screenshot (fast JPEG) — backend decides whether to include in prompt
+      // ── Timing: track every phase ──
+      const t0 = performance.now();
+
       const state = await captureState(true);
+      const tCapture = performance.now();
 
       const tab = await resolveAgentTab();
       const requestBody = {
@@ -427,7 +430,6 @@ async function runAgent(task) {
         page_scroll: state.pageScroll,
         page_loading: state.pageLoading || false,
       };
-      // Always send the screenshot data — backend decides whether to include it
       if (state.screenshot.base64) {
         requestBody.image = state.screenshot.base64;
       }
@@ -435,33 +437,25 @@ async function runAgent(task) {
       if (loopWarning) requestBody.loop_warning = loopWarning;
 
       const loadingEl = addLoading();
-
-      // Fetch with 30s timeout + abort support
       currentAbortController = new AbortController();
       const timeoutId = setTimeout(() => currentAbortController.abort(), 90000);
 
+      const tApiStart = performance.now();
       let stepRes;
       try {
-        stepRes = await fetch(
-          `${API_BASE}/session/${sessionId}/step`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(requestBody),
-            signal: currentAbortController.signal,
-          }
-        );
+        stepRes = await fetch(`${API_BASE}/session/${sessionId}/step`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(requestBody),
+          signal: currentAbortController.signal,
+        });
       } catch (fetchErr) {
         clearTimeout(timeoutId);
         loadingEl.remove();
         currentAbortController = null;
         if (fetchErr.name === "AbortError") {
           killRetries++;
-          if (killRetries >= 3) {
-            addError("Timed out 3 times — skipping this step.");
-            killRetries = 0;
-            continue;
-          }
+          if (killRetries >= 3) { addError("Timed out 3 times — skipping."); killRetries = 0; continue; }
           addLog(`Request timed out — retry ${killRetries}/3...`, "log-error");
           continue;
         }
@@ -469,16 +463,14 @@ async function runAgent(task) {
       }
       clearTimeout(timeoutId);
       currentAbortController = null;
-      killRetries = 0; // Reset on successful fetch
+      killRetries = 0;
+      const tApiEnd = performance.now();
 
       loadingEl.remove();
 
       if (!stepRes.ok) {
         consecutiveFailures++;
-        if (consecutiveFailures >= 3) {
-          addError("3 consecutive server errors. Stopping.");
-          break;
-        }
+        if (consecutiveFailures >= 3) { addError("3 consecutive server errors. Stopping."); break; }
         const err = await stepRes.json().catch(() => ({}));
         addError(err.detail || `Server error: ${stepRes.status}`);
         await sleep(1000);
@@ -490,72 +482,63 @@ async function runAgent(task) {
 
       addThought(result);
 
-      if (!result.action) {
-        addError("No action returned by model.");
-        break;
-      }
+      if (!result.action) { addError("No action returned by model."); break; }
 
-      // Handle screenshot request — model needs visual context, re-loop immediately
       if (result.action.type === "screenshot") {
         addLog(`<span class="action-icon">\u{1F4F7}</span> <span>Requesting screenshot...</span>`, "log-action");
-        continue; // Backend already set wants_screenshot=true, next step will include it
+        continue;
       }
 
       actionHistory.push(JSON.stringify(result.action));
       addAction(result.action);
 
+      // ── Execute action ──
+      const tExecStart = performance.now();
+      let shouldBreak = false;
+      let shouldContinue = false;
+
       if (result.action.type === "done") {
         addDone(result.action.summary || "Task complete.");
         completed = true;
-        break;
-      }
-
-      if (result.action.type === "ask_user") {
+        shouldBreak = true;
+      } else if (result.action.type === "ask_user") {
         await pauseForUser(result.action.question || "Please help.");
-        if (!running) break;
-        continue;
-      }
-
-      // Handle stealth_solve — escalate to patchright for Cloudflare bypass
-      if (result.action.type === "stealth_solve") {
-        // ALWAYS get URL from the actual tab, not from the model
-        const tab = await chrome.tabs.get(state.screenshot.tabId);
-        const targetUrl = tab.url;
-        addLog(
-          `<div class="thought-label">Stealth Solve</div>` +
-          `<div>Launching stealth browser to bypass Cloudflare on ${escapeHtml(targetUrl)}...</div>`,
-          "log-thought"
-        );
-
-        const solveResult = await stealthSolve(state.screenshot.tabId, targetUrl, API_BASE);
-
+        if (!running) { shouldBreak = true; } else { shouldContinue = true; }
+      } else if (result.action.type === "stealth_solve") {
+        const solveTab = await resolveAgentTab();
+        addLog(`<div class="thought-label">Stealth Solve</div><div>Bypassing Cloudflare...</div>`, "log-thought");
+        const solveResult = await stealthSolve(solveTab.id, solveTab.url, API_BASE);
         if (solveResult.success) {
-          addLog(
-            `<span class="action-icon">\u{1F510}</span> <span>Cloudflare bypassed! cf_clearance: ${solveResult.cf_clearance ? "yes" : "no"}, ${solveResult.cookiesInjected} cookies injected. Page reloaded.</span>`,
-            "log-action"
-          );
+          addLog(`<span class="action-icon">\u{1F510}</span> <span>Cloudflare bypassed!</span>`, "log-action");
           await detachDebugger();
-          await sleep(2000);
         } else {
-          addError(`Stealth solve failed: ${solveResult.error || "Unknown error"}`);
+          addError(`Stealth solve failed: ${solveResult.error || "Unknown"}`);
         }
-        continue;
-      }
-
-      // Execute tab actions vs page actions
-      if (["new_tab", "switch_tab", "close_tab"].includes(result.action.type)) {
+        shouldContinue = true;
+      } else if (["new_tab", "switch_tab", "close_tab"].includes(result.action.type)) {
         await executeTabAction(result.action);
       } else {
         const executed = await executeAction(state.screenshot.tabId, result.action);
-
-        // Show extracted text
         if (executed && executed._extractedText) {
-          addLog(
-            `<div class="thought-label">Extracted Text</div><div>${escapeHtml(executed._extractedText)}</div>`,
-            "log-thought"
-          );
+          addLog(`<div class="thought-label">Extracted Text</div><div>${escapeHtml(executed._extractedText)}</div>`, "log-thought");
         }
       }
+
+      const tExecEnd = performance.now();
+
+      // ── Log timing ──
+      const captureMs = Math.round(tCapture - t0);
+      const apiMs = Math.round(tApiEnd - tApiStart);
+      const execMs = Math.round(tExecEnd - tExecStart);
+      const totalMs = Math.round(tExecEnd - t0);
+      console.log(`[Step ${step + 1}] capture=${captureMs}ms api=${apiMs}ms exec=${execMs}ms total=${totalMs}ms`);
+      addLog(
+        `<span class="timing">⏱ capture ${captureMs}ms · LLM ${apiMs}ms · exec ${execMs}ms · total ${totalMs}ms</span>`,
+        "log-timing"
+      );
+
+      if (shouldBreak) break;
+      if (shouldContinue) continue;
 
     }
 

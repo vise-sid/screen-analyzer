@@ -181,6 +181,13 @@ body {
   line-height: 1.5;
 }
 
+.log-timing {
+  padding: 4px 14px;
+  font-size: 11px;
+  color: #9ca3af;
+  font-family: monospace;
+}
+
 .log-done {
   background: #f0fdf4;
   border: 1px solid #86efac;
