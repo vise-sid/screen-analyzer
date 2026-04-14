@@ -289,8 +289,7 @@ async function captureScreenshot(tab) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-        format: "jpeg",
-        quality: 60,
+        format: "png",
       });
       break;
     } catch (e) {

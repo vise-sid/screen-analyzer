@@ -557,7 +557,7 @@ async def step_session(session_id: str, req: StepRequest):
             user_parts.append(
                 Part.from_bytes(
                     data=base64.b64decode(req.image),
-                    mime_type="image/jpeg",
+                    mime_type="image/png",
                 )
             )
         # Reset — model must request again if it needs another screenshot
@@ -571,7 +571,7 @@ async def step_session(session_id: str, req: StepRequest):
             f"=== USER MESSAGE (Step {step_num}) ===\n{prompt_text}\n"
         )
         if has_screenshot:
-            debug_img_path = DEBUG_DIR / f"{step_prefix}_screenshot.jpg"
+            debug_img_path = DEBUG_DIR / f"{step_prefix}_screenshot.png"
             debug_img_path.write_bytes(base64.b64decode(req.image))
 
         print(f"\n{'='*60}")
@@ -670,7 +670,7 @@ async def list_debug_steps():
     steps = []
     for f in files:
         step_num = f.stem.split("_")[1]
-        has_screenshot = (DEBUG_DIR / f"step_{step_num}_screenshot.jpg").exists()
+        has_screenshot = (DEBUG_DIR / f"step_{step_num}_screenshot.png").exists()
         has_response = (DEBUG_DIR / f"step_{step_num}_response.json").exists()
         steps.append({
             "step": int(step_num),
@@ -693,10 +693,10 @@ async def get_debug_prompt(step_num: int):
 @app.get("/debug/step/{step_num}/screenshot")
 async def get_debug_screenshot(step_num: int):
     """Get the screenshot sent to the model for a step."""
-    path = DEBUG_DIR / f"step_{step_num:03d}_screenshot.jpg"
+    path = DEBUG_DIR / f"step_{step_num:03d}_screenshot.png"
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"No screenshot for step {step_num}")
-    return FileResponse(path, media_type="image/jpeg")
+    return FileResponse(path, media_type="image/png")
 
 
 @app.get("/debug/step/{step_num}/response")
