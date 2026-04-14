@@ -97,9 +97,16 @@ function addError(msg) {
   addLog(escapeHtml(msg), "log-error");
 }
 
+const LOADING_MSGS = [
+  "Sniffing around...", "On the trail...", "Foxing through the page...",
+  "Eyes on screen...", "Working on it...", "Almost got it...",
+  "Reading the pixels...", "Thinking foxy thoughts...",
+];
+
 function addLoading() {
+  const msg = LOADING_MSGS[Math.floor(Math.random() * LOADING_MSGS.length)];
   return addLog(
-    `<div class="dot-pulse"><span></span><span></span><span></span></div> <span>Analyzing screen...</span>`,
+    `<div class="dot-pulse"><span></span><span></span><span></span></div> <span>${msg}</span>`,
     "log-loading"
   );
 }
