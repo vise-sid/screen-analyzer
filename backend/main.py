@@ -79,9 +79,10 @@ ask_user         {"type":"ask_user","question":"..."}
 <context>
 - Elements are grouped by page section and listed as [i]<tag>text</tag>. Use index i as "ref".
 - A screenshot is included on step 1 and after you request one. Otherwise you work from the element list.
-- PAGE CHANGED marker means the URL changed — review the new element list carefully.
-- SAME PAGE marker means you're on the same URL — elements updated but layout is familiar.
-- SCROLL CONTAINERS show scrollable areas with center coordinates.
+- URL is shown every step. Read URL parameters to understand page state (filters, search queries, sort order). You can modify the URL directly with navigate to change filters instantly.
+- PAGE CHANGED = URL changed, review new elements. SAME PAGE = same URL, layout familiar.
+- PAGE LOADING = page still loading, use wait before clicking.
+- PAGE SCROLL shows your position. SCROLL CONTAINERS show scrollable areas with center coordinates.
 - For credentials, 2FA, or unsolvable CAPTCHAs: use ask_user.
 </context>"""
 
@@ -108,6 +109,7 @@ class StepRequest(BaseModel):
     loop_warning: str | None = None
     is_canvas_heavy: bool = False
     page_scroll: dict | None = None
+    page_loading: bool = False
 
 
 @app.post("/session/start")
@@ -516,6 +518,8 @@ async def step_session(session_id: str, req: StepRequest):
         else:
             scroll_pos_text = ""
 
+        loading_text = "\n⏳ PAGE LOADING — use wait before interacting" if req.page_loading else ""
+
         # ── Page context: detect URL change ──
         current_url = req.url or ""
         last_url = session.get("last_url", "")
@@ -523,11 +527,11 @@ async def step_session(session_id: str, req: StepRequest):
         session["last_url"] = current_url
 
         if page_changed:
-            page_marker = f"⚡ PAGE CHANGED: {current_url}\n"
-        elif step_num > 1:
-            page_marker = "↻ SAME PAGE\n"
+            page_marker = f"⚡ PAGE CHANGED\n"
         else:
-            page_marker = f"URL: {current_url}\n"
+            page_marker = "↻ SAME PAGE\n" if step_num > 1 else ""
+        # Always show URL — model can read URL params to understand page state (filters, search queries, etc.)
+        url_line = f"URL: {current_url}\n" if current_url else ""
 
         # ── Screenshot: only include when requested or first step ──
         include_screenshot = session.get("wants_screenshot", False)
@@ -540,7 +544,9 @@ async def step_session(session_id: str, req: StepRequest):
         prompt_text = (
             f"Task: {session['task']}\n"
             f"Step {step_num} | {page_marker}"
-            f"{scroll_pos_text}\n"
+            f"{url_line}"
+            f"{scroll_pos_text}"
+            f"{loading_text}\n"
             f"{loop_text}\n"
             f"{popup_text}\n"
             f"{captcha_text}\n"

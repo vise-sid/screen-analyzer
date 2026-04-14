@@ -557,6 +557,10 @@ const EXTRACT_ELEMENTS_SCRIPT = `
   const scrollTop = window.scrollY || document.documentElement.scrollTop;
   const scrollPct = docHeight > viewHeight ? Math.round(scrollTop / (docHeight - viewHeight) * 100) : 0;
 
+  // Page loading state
+  const readyState = document.readyState; // "loading", "interactive", "complete"
+  const isLoading = readyState !== 'complete';
+
   return JSON.stringify({
     elements,
     scrollContainers,
@@ -565,6 +569,7 @@ const EXTRACT_ELEMENTS_SCRIPT = `
     iframes: iframes.length > 0 ? iframes : undefined,
     isCanvasHeavy,
     viewport: { width: window.innerWidth, height: window.innerHeight },
+    pageLoading: isLoading,
     pageScroll: {
       scrollTop: Math.round(scrollTop),
       scrollPct,
