@@ -67,8 +67,8 @@ screenshot       {"type":"screenshot"}                                          
 new_tab          {"type":"new_tab","url":"https://..."}
 switch_tab       {"type":"switch_tab","tabId":12345}
 close_tab        {"type":"close_tab","tabId":12345}
-click_captcha    {"type":"click_captcha"}                                            Human-like CAPTCHA click
-stealth_solve    {"type":"stealth_solve"}                                            Stealth browser for Cloudflare
+click_captcha    {"type":"click_captcha"}                                            Human-like click on CAPTCHA checkbox (Turnstile/reCAPTCHA/hCaptcha)
+stealth_solve    {"type":"stealth_solve"}                                            Launch stealth browser to bypass Cloudflare (use when click_captcha fails)
 dismiss_popup    {"type":"dismiss_popup"}                                            Force-close popups/modals
 accept_dialog    {"type":"accept_dialog"}
 dismiss_dialog   {"type":"dismiss_dialog"}
@@ -83,7 +83,8 @@ ask_user         {"type":"ask_user","question":"..."}
 - PAGE CHANGED = URL changed, review new elements. SAME PAGE = same URL, layout familiar.
 - PAGE LOADING = page still loading, use wait before clicking.
 - PAGE SCROLL shows your position. SCROLL CONTAINERS show scrollable areas with center coordinates.
-- For credentials, 2FA, or unsolvable CAPTCHAs: use ask_user.
+- For credentials or 2FA: use ask_user.
+- CAPTCHA solving: For checkbox CAPTCHAs (Turnstile/reCAPTCHA), use click_captcha first, then stealth_solve if it fails. For TEXT CAPTCHAs, read the distorted text from the screenshot and type it. For IMAGE CAPTCHAs (select all with X), use the screenshot and try your best with vision. Track attempts — after 3 failures, use ask_user. Do NOT give up on the first failure.
 </context>"""
 
 
@@ -533,11 +534,14 @@ async def step_session(session_id: str, req: StepRequest):
         # Always show URL — model can read URL params to understand page state (filters, search queries, etc.)
         url_line = f"URL: {current_url}\n" if current_url else ""
 
-        # ── Screenshot: only include when requested or first step ──
+        # ── Screenshot: include when requested, first step, page change, or CAPTCHA ──
         include_screenshot = session.get("wants_screenshot", False)
         has_screenshot = include_screenshot and req.image is not None and len(req.image) > 0
         # Always include on page change (new layout to understand)
         if page_changed and req.image:
+            has_screenshot = True
+        # Always include when CAPTCHA detected (model needs to SEE it to solve it)
+        if req.captcha and req.image:
             has_screenshot = True
         screenshot_note = "Screenshot attached." if has_screenshot else ""
 
@@ -594,7 +598,7 @@ async def step_session(session_id: str, req: StepRequest):
             model="gemini-3-flash-preview",
             config=GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
-                thinking_config=ThinkingConfig(thinking_level="minimal"),
+                thinking_config=ThinkingConfig(thinking_level="low"),
             ),
             contents=contents,
         )
