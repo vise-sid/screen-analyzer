@@ -341,6 +341,7 @@ async function runAgent(task) {
   try {
     // Initialize tab manager — creates "Agent" tab group
     await initTabManager();
+    startPopupDetection();
 
     // Get initial viewport info
     const initial = await captureScreenshot();
@@ -492,6 +493,7 @@ async function runAgent(task) {
   } finally {
     setRunning(false);
     // Cleanup: ungroup tabs (keep them open for the user)
+    stopPopupDetection();
     await cleanupTabManager();
     if (sessionId) {
       fetch(`${API_BASE}/session/${sessionId}`, { method: "DELETE" }).catch(

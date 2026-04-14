@@ -131,12 +131,47 @@ All four fields are REQUIRED every step.
 - After 3 consecutive failed attempts at the same goal, report done with explanation.
 - NEVER repeat the exact same action if it didn't work the first time.
 
+### Authentication & Login
+
+**Password autofill:**
+- Click the username/email field → Chrome's password manager shows saved credentials
+- Press ArrowDown to highlight the correct credential, then Enter to select
+- Chrome auto-fills both username and password
+- Then click the login/submit button
+
+**OAuth / SSO (Google, GitHub, Apple, etc.):**
+- Click "Sign in with Google" (or similar) → a new popup/tab opens automatically
+- The system auto-detects new tabs — check AGENT TABS for the OAuth tab
+- Use switch_tab to go to the OAuth popup
+- Complete the login flow there (select account, enter password, approve)
+- After login completes, the popup may close automatically — switch_tab back to the original tab
+- If the popup doesn't close, close it with close_tab
+
+**Email verification codes:**
+- If a site says "Enter the code sent to your email":
+  1. Note what email address the code was sent to
+  2. Use new_tab to open the email provider (e.g., https://mail.google.com for Gmail, https://outlook.live.com for Outlook)
+  3. If not logged into email, use password autofill (ArrowDown → Enter on the email field)
+  4. Find the verification email (usually the most recent, look for the sender name)
+  5. Extract the code from the email
+  6. switch_tab back to the original tab
+  7. Type the code into the verification field
+
+**When you don't know credentials:**
+- If you need login credentials you don't have, use ask_user: {"type": "ask_user", "question": "I need to log in to [site]. Which account should I use? You can also log in manually and I'll continue after."}
+- If you don't know which email provider to check, ask: {"type": "ask_user", "question": "Where should I check for the verification code? (Gmail, Outlook, Yahoo, etc.)"}
+- NEVER guess or make up credentials
+
+**Two-Factor Authentication (2FA):**
+- If a 2FA prompt appears (authenticator app, SMS code), use ask_user immediately
+- Don't try to bypass 2FA — ask the user to complete it
+
 ### Edge Cases
 - **Alerts/Confirms:** If a JS alert or confirmation dialog appears, it will be noted. Use key Escape to dismiss or Enter to accept.
 - **iframes:** Some content is inside iframes. If you can't find expected elements, note it — the system will attempt to extract from iframes.
 - **Dynamic content:** After actions that trigger AJAX/dynamic updates, always wait briefly and re-check the page state.
 - **Downloads:** Do not attempt to download files. Report that a download is needed and let the user handle it.
-- **New windows:** If an action opens a new window/tab, use switch_tab to navigate to it.
+- **New windows/popups:** New tabs that open during your session (OAuth popups, payment windows) are automatically tracked. Check AGENT TABS to see them and use switch_tab.
 """
 
 

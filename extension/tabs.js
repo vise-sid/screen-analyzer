@@ -175,3 +175,43 @@ async function getAgentTabs() {
 function getActiveAgentTabId() {
   return activeAgentTabId;
 }
+
+// ── Popup / New Tab Detection ───────────────────────────────
+
+let popupListener = null;
+
+/**
+ * Start listening for new tabs/popups that open during the agent session.
+ * Automatically adds them to the agent group (OAuth popups, email windows, etc.).
+ */
+function startPopupDetection() {
+  if (popupListener) return;
+
+  popupListener = async (tab) => {
+    // Only track tabs that open while agent is running
+    if (!agentGroupId || agentTabIds.size >= MAX_AGENT_TABS) return;
+
+    // Add to tracking
+    agentTabIds.add(tab.id);
+    activeAgentTabId = tab.id;
+
+    // Add to agent group
+    try {
+      await chrome.tabs.group({ tabIds: [tab.id], groupId: agentGroupId });
+    } catch (_) {}
+
+    console.log(`Popup/new tab detected: ${tab.id} (${tab.pendingUrl || tab.url || "loading..."})`);
+  };
+
+  chrome.tabs.onCreated.addListener(popupListener);
+}
+
+/**
+ * Stop listening for new tabs.
+ */
+function stopPopupDetection() {
+  if (popupListener) {
+    chrome.tabs.onCreated.removeListener(popupListener);
+    popupListener = null;
+  }
+}
