@@ -274,8 +274,24 @@ async function captureScreenshot() {
   };
 }
 
-async function captureState() {
-  const screenshot = await captureScreenshot();
+async function captureState(needsScreenshot = true) {
+  // Get tab info for element extraction (always needed)
+  const tabId = getActiveAgentTabId();
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.active) {
+    await chrome.tabs.update(tabId, { active: true });
+    await sleep(300);
+  }
+
+  // Screenshot: skip when not needed (after type/key/wait)
+  let screenshot = { base64: null, tabId: tab.id, width: tab.width, height: tab.height };
+  if (needsScreenshot) {
+    try {
+      screenshot = await captureScreenshot();
+    } catch (e) {
+      console.warn("Screenshot failed, continuing without:", e);
+    }
+  }
 
   let elements = null;
   let scrollContainers = null;
@@ -283,12 +299,17 @@ async function captureState() {
   let captcha = null;
   let isCanvasHeavy = false;
   try {
-    const data = await extractElements(screenshot.tabId);
+    const data = await extractElements(screenshot.tabId || tab.id);
     elements = data.elements;
     scrollContainers = data.scrollContainers;
     popup = data.popup;
     captcha = data.captcha;
     isCanvasHeavy = data.isCanvasHeavy;
+
+    // Cap elements at 75 to avoid huge prompts on complex pages
+    if (elements && elements.length > 75) {
+      elements = elements.slice(0, 75);
+    }
   } catch (err) {
     console.warn("Element extraction failed, using vision-only mode:", err);
   }
@@ -362,18 +383,25 @@ async function runAgent(task) {
     const { session_id } = await startRes.json();
     sessionId = session_id;
 
-    // Agent loop with loop detection and failure tracking
+    // Agent loop
     let completed = false;
-    const actionHistory = []; // for loop detection
+    const actionHistory = [];
     let consecutiveFailures = 0;
+    let killRetries = 0;
+    let lastActionType = null; // For screenshot optimization
+
+    // Actions that don't need a screenshot on the NEXT step
+    const SKIP_SCREENSHOT_AFTER = new Set([
+      "type", "key", "focus_and_type", "clear_and_type", "wait",
+    ]);
 
     for (let step = 0; step < MAX_STEPS && running; step++) {
-      const state = await captureState();
+      // Screenshot optimization: skip screenshot after simple actions
+      const needsScreenshot = !lastActionType || !SKIP_SCREENSHOT_AFTER.has(lastActionType);
+      const state = await captureState(needsScreenshot);
 
-      // Build request with loop detection hint
       const loopWarning = detectLoop(actionHistory);
       const requestBody = {
-        image: state.screenshot.base64,
         elements: state.elements,
         scroll_containers: state.scrollContainers,
         popup: state.popup,
@@ -382,13 +410,17 @@ async function runAgent(task) {
         is_canvas_heavy: state.isCanvasHeavy,
         agent_tabs: state.agentTabs,
       };
+      // Only include screenshot when needed
+      if (state.screenshot.base64) {
+        requestBody.image = state.screenshot.base64;
+      }
       if (loopWarning) {
         requestBody.loop_warning = loopWarning;
       }
 
       const loadingEl = addLoading();
 
-      // Fetch with 30s timeout + abort support for kill button
+      // Fetch with 30s timeout + abort support
       currentAbortController = new AbortController();
       const timeoutId = setTimeout(() => currentAbortController.abort(), 30000);
 
@@ -408,13 +440,21 @@ async function runAgent(task) {
         loadingEl.remove();
         currentAbortController = null;
         if (fetchErr.name === "AbortError") {
-          addLog("Step killed — retrying...", "log-error");
-          continue; // Retry the step
+          killRetries++;
+          if (killRetries >= 3) {
+            addError("Killed 3 times — skipping this step.");
+            killRetries = 0;
+            lastActionType = "wait";
+            continue;
+          }
+          addLog(`Step killed — retry ${killRetries}/3...`, "log-error");
+          continue;
         }
         throw fetchErr;
       }
       clearTimeout(timeoutId);
       currentAbortController = null;
+      killRetries = 0; // Reset on successful fetch
 
       loadingEl.remove();
 
@@ -499,8 +539,10 @@ async function runAgent(task) {
             "log-thought"
           );
         }
-
       }
+
+      // Track for screenshot optimization
+      lastActionType = result.action.type;
     }
 
     if (!completed && running) {

@@ -164,7 +164,7 @@ class StartRequest(BaseModel):
 
 
 class StepRequest(BaseModel):
-    image: str
+    image: str | None = None
     elements: list[dict] | None = None
     scroll_containers: list[dict] | None = None
     popup: dict | None = None
@@ -572,6 +572,9 @@ async def step_session(session_id: str, req: StepRequest):
         tabs_text = _format_agent_tabs(req.agent_tabs)
         loop_text = f"\n⚠ {req.loop_warning}" if req.loop_warning else ""
 
+        has_screenshot = req.image is not None and len(req.image) > 0
+        screenshot_note = "Screenshot:" if has_screenshot else "(No screenshot this step — page unchanged after text input)"
+
         user_parts = [
             Part.from_text(
                 text=(
@@ -585,14 +588,18 @@ async def step_session(session_id: str, req: StepRequest):
                     f"{elements_text}\n"
                     f"{scroll_text}\n"
                     f"{tabs_text}\n\n"
-                    f"Screenshot:"
+                    f"{screenshot_note}"
                 )
             ),
-            Part.from_bytes(
-                data=base64.b64decode(req.image),
-                mime_type="image/png",
-            ),
         ]
+
+        if has_screenshot:
+            user_parts.append(
+                Part.from_bytes(
+                    data=base64.b64decode(req.image),
+                    mime_type="image/png",
+                )
+            )
 
         contents = list(session["history"])
         contents.append(Content(role="user", parts=user_parts))
