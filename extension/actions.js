@@ -196,13 +196,51 @@ function sendCommand(method, params = {}) {
 
 const EXTRACT_ELEMENTS_SCRIPT = `
 (() => {
+  // Phase 1: Find page landmarks for semantic grouping
+  const LANDMARK_SELECTORS = [
+    'nav', 'main', 'header', 'footer', 'aside', 'form',
+    '[role="navigation"]', '[role="search"]', '[role="main"]',
+    '[role="banner"]', '[role="form"]', '[role="dialog"]',
+    '[role="alertdialog"]', '[role="complementary"]',
+    '[role="contentinfo"]', '[role="region"]'
+  ];
+
+  const landmarkEls = [];
+  const landmarkSet = new Set();
+  document.querySelectorAll(LANDMARK_SELECTORS.join(',')).forEach(el => {
+    if (landmarkSet.has(el)) return;
+    landmarkSet.add(el);
+    const r = el.getBoundingClientRect();
+    if (r.width < 50 || r.height < 30) return;
+    const s = getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return;
+    landmarkEls.push({
+      element: el,
+      label: el.getAttribute('aria-label')
+        || el.getAttribute('role')
+        || el.tagName.toLowerCase()
+    });
+  });
+
+  function findGroup(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+      for (const lm of landmarkEls) {
+        if (lm.element === node) return lm.label;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  // Phase 2: Extract interactive elements with group assignment
   const SELECTORS = [
     'a[href]', 'button', 'input', 'select', 'textarea',
     '[role="button"]', '[role="link"]', '[role="tab"]',
     '[role="menuitem"]', '[role="checkbox"]', '[role="radio"]',
     '[role="switch"]', '[role="option"]', '[role="combobox"]',
     '[role="searchbox"]', '[role="textbox"]', '[role="listbox"]',
-    '[role="menu"]', '[role="dialog"]',
+    '[role="menu"]',
     '[onclick]', '[tabindex]:not([tabindex="-1"])',
     'summary', 'details', 'label[for]',
     'th[aria-sort]', '[contenteditable="true"]',
@@ -228,6 +266,7 @@ const EXTRACT_ELEMENTS_SCRIPT = `
     const role = el.getAttribute('role') || tag;
     const ariaLabel = el.getAttribute('aria-label') || '';
     const placeholder = el.getAttribute('placeholder') || '';
+    const title = el.getAttribute('title') || '';
     const text = (el.innerText || '').trim().substring(0, 80);
     const type = el.getAttribute('type') || '';
     const href = el.getAttribute('href') || '';
@@ -235,7 +274,7 @@ const EXTRACT_ELEMENTS_SCRIPT = `
     const checked = el.checked;
     const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
 
-    let desc = ariaLabel || text || placeholder || (type ? type + ' input' : tag);
+    let desc = ariaLabel || text || placeholder || title || (type ? type + ' input' : tag);
 
     elements.push({
       tag, role, desc, type,
@@ -243,6 +282,7 @@ const EXTRACT_ELEMENTS_SCRIPT = `
       value,
       checked: checked || undefined,
       disabled: disabled || undefined,
+      group: findGroup(el),
       rect: {
         x: Math.round(rect.x),
         y: Math.round(rect.y),
@@ -930,7 +970,6 @@ async function executeAction(tabId, action) {
       const c = getCoords(action);
       if (c) {
         await cdpClick(c.x, c.y);
-        await sleep(500);
       }
       break;
     }
@@ -939,7 +978,6 @@ async function executeAction(tabId, action) {
       const c = getCoords(action);
       if (c) {
         await cdpDoubleClick(c.x, c.y);
-        await sleep(500);
       }
       break;
     }
@@ -948,52 +986,40 @@ async function executeAction(tabId, action) {
       const c = getCoords(action);
       if (c) {
         await cdpMoveMouse(c.x, c.y);
-        await sleep(600);
       }
       break;
     }
 
     case "type":
       await cdpType(action.text);
-      await sleep(200);
       break;
 
     case "focus_and_type": {
-      // Combined action: click an element to focus it, then type
       const c = getCoords(action);
       if (c) {
         await cdpClick(c.x, c.y);
-        await sleep(300);
-        // If replacing, select all and delete first
+        await sleep(100); // Minimal wait for focus
         if (action.clear) {
           await cdpSelectAll();
-          await sleep(50);
           await cdpKey("Backspace");
-          await sleep(100);
         }
         await cdpType(action.text);
-        await sleep(200);
       }
       break;
     }
 
     case "clear_and_type":
       await cdpSelectAll();
-      await sleep(50);
       await cdpKey("Backspace");
-      await sleep(100);
       await cdpType(action.text);
-      await sleep(200);
       break;
 
     case "key":
       await cdpKey(action.key);
-      await sleep(300);
       break;
 
     case "select":
       await cdpSelectOption(action.ref, action.value);
-      await sleep(300);
       break;
 
     case "scroll":
@@ -1003,22 +1029,18 @@ async function executeAction(tabId, action) {
         action.deltaX || 0,
         action.deltaY || 0
       );
-      await sleep(500);
       break;
 
     case "navigate":
       await cdpNavigate(action.url);
-      await sleep(2000);
       break;
 
     case "back":
       await cdpGoBack();
-      await sleep(1500);
       break;
 
     case "forward":
       await cdpGoForward();
-      await sleep(1500);
       break;
 
     case "extract_text": {
@@ -1030,14 +1052,12 @@ async function executeAction(tabId, action) {
     case "dismiss_popup": {
       const result = await cdpDismissPopup();
       action._dismissResult = result;
-      await sleep(500);
       break;
     }
 
     case "click_captcha": {
       const result = await cdpClickCaptcha();
       action._captchaResult = result;
-      await sleep(2000);
       break;
     }
 
@@ -1047,12 +1067,10 @@ async function executeAction(tabId, action) {
 
     case "accept_dialog":
       await handleDialog(true);
-      await sleep(300);
       break;
 
     case "dismiss_dialog":
       await handleDialog(false);
-      await sleep(300);
       break;
 
     case "done":
@@ -1068,6 +1086,31 @@ async function executeAction(tabId, action) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Wait for the page to be ready (document loaded, no pending navigation).
+ * Called before capturing state — NOT after every action.
+ * This replaces all the hardcoded post-action sleeps.
+ */
+async function waitForPageReady(timeout = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      const result = await sendCommand("Runtime.evaluate", {
+        expression: "document.readyState",
+        returnByValue: true,
+      });
+      if (result.result.value === "complete") {
+        return; // Page is ready
+      }
+    } catch (_) {
+      // Runtime.evaluate fails during navigation — detach and retry
+      await detachDebugger();
+    }
+    await sleep(300);
+  }
+  // Timeout — proceed anyway, page might be slow-loading dynamic content
 }
 
 // ── Dialog / Alert Handling ──────────────────────────────────

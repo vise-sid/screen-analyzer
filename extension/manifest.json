@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Screen Analyzer",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Capture your screen and get AI-powered analysis via Gemini",
   "permissions": ["activeTab", "sidePanel", "tabs", "tabGroups", "debugger", "cookies"],
   "host_permissions": ["<all_urls>"],

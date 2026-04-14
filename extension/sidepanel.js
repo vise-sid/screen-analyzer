@@ -24,7 +24,15 @@ function addLog(html, className) {
 }
 
 function addThought(result) {
-  // Display structured eval/memory/goal or fall back to thought string
+  // New format: single "thought" field
+  if (result.thought) {
+    addLog(
+      `<div class="thought-label">Thinking</div><div>${escapeHtml(result.thought)}</div>`,
+      "log-thought"
+    );
+    return;
+  }
+  // Backward compat: old eval/memory/goal format
   const parts = [];
   if (result.eval && result.eval !== "start") {
     parts.push(`<div class="thought-section"><span class="thought-tag eval-tag">Eval</span> ${escapeHtml(result.eval)}</div>`);
@@ -35,11 +43,6 @@ function addThought(result) {
   if (result.goal) {
     parts.push(`<div class="thought-section"><span class="thought-tag goal-tag">Goal</span> ${escapeHtml(result.goal)}</div>`);
   }
-  // Fallback for old "thought" field
-  if (parts.length === 0 && result.thought) {
-    parts.push(`<div>${escapeHtml(result.thought)}</div>`);
-  }
-
   if (parts.length > 0) {
     addLog(
       `<div class="thought-label">Thinking</div>${parts.join("")}`,
@@ -238,14 +241,41 @@ function detectLoop(actionHistory) {
 
 // ── Screenshot + Elements ───────────────────────────────────
 
-async function captureScreenshot() {
-  // Use the agent's active tab, not necessarily the chrome-active tab
+async function resolveAgentTab() {
+  // Try the tracked active tab first, with retries for transient navigation errors
   const tabId = getActiveAgentTabId();
-  const tab = await chrome.tabs.get(tabId);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      return tab;
+    } catch (e) {
+      if (attempt < 2) {
+        await sleep(1000); // Tab may be mid-navigation, wait and retry
+      }
+    }
+  }
+
+  // Fallback: find any tab still in the agent group
+  console.warn(`Tab ${tabId} unavailable, searching for active agent tab...`);
+  const allTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (allTabs.length > 0) {
+    const fallback = allTabs[0];
+    // Update the tab manager to track this tab
+    agentTabIds.add(fallback.id);
+    activeAgentTabId = fallback.id;
+    console.log(`Recovered to tab ${fallback.id}: ${fallback.url}`);
+    return fallback;
+  }
+
+  throw new Error("No available agent tab found");
+}
+
+async function captureScreenshot() {
+  const tab = await resolveAgentTab();
 
   // Make sure the agent tab is the visible one
   if (!tab.active) {
-    await chrome.tabs.update(tabId, { active: true });
+    await chrome.tabs.update(tab.id, { active: true });
     await sleep(300);
   }
 
@@ -275,15 +305,18 @@ async function captureScreenshot() {
 }
 
 async function captureState(needsScreenshot = true) {
-  // Get tab info for element extraction (always needed)
-  const tabId = getActiveAgentTabId();
-  const tab = await chrome.tabs.get(tabId);
+  // Resolve agent tab with retries (handles mid-navigation states)
+  const tab = await resolveAgentTab();
   if (!tab.active) {
-    await chrome.tabs.update(tabId, { active: true });
+    await chrome.tabs.update(tab.id, { active: true });
     await sleep(300);
   }
 
-  // Screenshot: skip when not needed (after type/key/wait)
+  // Wait for page to be ready before capturing (replaces hardcoded post-action sleeps)
+  try {
+    await waitForPageReady();
+  } catch (_) {}
+
   let screenshot = { base64: null, tabId: tab.id, width: tab.width, height: tab.height };
   if (needsScreenshot) {
     try {
@@ -306,9 +339,9 @@ async function captureState(needsScreenshot = true) {
     captcha = data.captcha;
     isCanvasHeavy = data.isCanvasHeavy;
 
-    // Cap elements at 75 to avoid huge prompts on complex pages
-    if (elements && elements.length > 75) {
-      elements = elements.slice(0, 75);
+    // Cap elements to keep prompt size manageable
+    if (elements && elements.length > 200) {
+      elements = elements.slice(0, 200);
     }
   } catch (err) {
     console.warn("Element extraction failed, using vision-only mode:", err);
@@ -388,17 +421,8 @@ async function runAgent(task) {
     const actionHistory = [];
     let consecutiveFailures = 0;
     let killRetries = 0;
-    let lastActionType = null; // For screenshot optimization
-
-    // Actions that don't need a screenshot on the NEXT step
-    const SKIP_SCREENSHOT_AFTER = new Set([
-      "type", "key", "focus_and_type", "clear_and_type", "wait",
-    ]);
-
     for (let step = 0; step < MAX_STEPS && running; step++) {
-      // Screenshot optimization: skip screenshot after simple actions
-      const needsScreenshot = !lastActionType || !SKIP_SCREENSHOT_AFTER.has(lastActionType);
-      const state = await captureState(needsScreenshot);
+      const state = await captureState(true);
 
       const loopWarning = detectLoop(actionHistory);
       const requestBody = {
@@ -444,7 +468,6 @@ async function runAgent(task) {
           if (killRetries >= 3) {
             addError("Timed out 3 times — skipping this step.");
             killRetries = 0;
-            lastActionType = "wait";
             continue;
           }
           addLog(`Request timed out — retry ${killRetries}/3...`, "log-error");
@@ -541,8 +564,6 @@ async function runAgent(task) {
         }
       }
 
-      // Track for screenshot optimization
-      lastActionType = result.action.type;
     }
 
     if (!completed && running) {
