@@ -396,10 +396,12 @@ async function runAgent(task) {
     let consecutiveFailures = 0;
     let killRetries = 0;
     for (let step = 0; step < MAX_STEPS && running; step++) {
+      // Always capture screenshot (fast JPEG) — backend decides whether to include in prompt
       const state = await captureState(true);
 
-      const loopWarning = detectLoop(actionHistory);
+      const tab = await resolveAgentTab();
       const requestBody = {
+        url: tab.url || "",
         elements: state.elements,
         scroll_containers: state.scrollContainers,
         popup: state.popup,
@@ -408,13 +410,12 @@ async function runAgent(task) {
         is_canvas_heavy: state.isCanvasHeavy,
         agent_tabs: state.agentTabs,
       };
-      // Only include screenshot when needed
+      // Always send the screenshot data — backend decides whether to include it
       if (state.screenshot.base64) {
         requestBody.image = state.screenshot.base64;
       }
-      if (loopWarning) {
-        requestBody.loop_warning = loopWarning;
-      }
+      const loopWarning = detectLoop(actionHistory);
+      if (loopWarning) requestBody.loop_warning = loopWarning;
 
       const loadingEl = addLoading();
 
@@ -470,7 +471,6 @@ async function runAgent(task) {
       consecutiveFailures = 0;
       const result = await stepRes.json();
 
-      // Display structured thinking (eval/memory/goal)
       addThought(result);
 
       if (!result.action) {
@@ -478,9 +478,13 @@ async function runAgent(task) {
         break;
       }
 
-      // Track action for loop detection
-      actionHistory.push(JSON.stringify(result.action));
+      // Handle screenshot request — model needs visual context, re-loop immediately
+      if (result.action.type === "screenshot") {
+        addLog(`<span class="action-icon">\u{1F4F7}</span> <span>Requesting screenshot...</span>`, "log-action");
+        continue; // Backend already set wants_screenshot=true, next step will include it
+      }
 
+      actionHistory.push(JSON.stringify(result.action));
       addAction(result.action);
 
       if (result.action.type === "done") {
@@ -489,10 +493,8 @@ async function runAgent(task) {
         break;
       }
 
-      // Handle ask_user — pause and wait for user to resume
       if (result.action.type === "ask_user") {
-        const question = result.action.question || "Please help with the current page.";
-        await pauseForUser(question);
+        await pauseForUser(result.action.question || "Please help.");
         if (!running) break;
         continue;
       }

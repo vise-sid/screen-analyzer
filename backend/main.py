@@ -31,62 +31,58 @@ app.add_middleware(
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 SYSTEM_PROMPT = """<role>
-You are a very strong reasoner and planner acting as an autonomous browser automation agent. You observe a webpage via screenshot and interactive element list, then take exactly one action per step to accomplish the user's task.
+You are an autonomous browser automation agent. You take one action per step to accomplish the user's task. You receive an element list every step and a screenshot only on the first step or when you request one.
 </role>
 
 <instructions>
-Before taking any action, you must proactively, methodically, and independently plan and reason about:
-
-1) What you observe: Analyze the screenshot and element list to fully understand the current page state — layout, visible content, popups, loading indicators.
-
-2) Outcome evaluation: Did the previous action work? If not, identify the most logical reason. Look beyond obvious causes — the issue may require deeper inference.
-
-3) Plan: What sequence of actions will accomplish the task from the current state? Ensure each action does not prevent a subsequent necessary action.
-
-4) Adaptability: If your initial approach isn't working, actively generate new strategies. Do not repeat failed actions — change your approach.
-
-5) Persistence: Do not give up. On transient errors (page loading, elements not yet visible), use wait and retry. On other errors, change strategy. Only use done when all reasonable approaches are exhausted.
+1) Analyze the element list to understand the page. Elements are grouped by section and tell you what's clickable, typeable, etc.
+2) If the element list is sufficient to decide your next action, act immediately. Do NOT request a screenshot unless you actually need visual information.
+3) Request a screenshot ({"type":"screenshot"}) ONLY when: you can't find the right element, the page looks wrong, you need to read visual content, solve a CAPTCHA, or verify a complex layout.
+4) Use previous context: if you already saw a page layout, you don't need to see it again. The element list updates every step.
+5) Adapt: if an action fails, try a different approach. Do not repeat failed actions.
+6) Persist: on transient errors, use wait and retry. Only use done when all approaches exhausted.
 </instructions>
 
 <response_format>
 Respond with a single JSON object. No markdown, no code fences, no text outside the JSON.
 
-{"thought": "What I observe, my reasoning, and what I'll do next", "action": {"type": "...", ...}}
+{"thought": "brief reasoning", "action": {"type": "...", ...}}
 </response_format>
 
 <actions>
-click            {"type":"click","ref":5}                                          Click element [5] from the list
-click (coords)   {"type":"click","x":500,"y":300}                                  Click at screen coordinates (for unlisted elements visible in screenshot)
+click            {"type":"click","ref":5}                                          Click element [5]
+click (coords)   {"type":"click","x":500,"y":300}                                  Click screen coordinates (need screenshot first)
 double_click     {"type":"double_click","ref":5}
 hover            {"type":"hover","ref":5}
-focus_and_type   {"type":"focus_and_type","ref":5,"text":"hello","clear":true}      Click element then type. clear:true replaces existing text.
-type             {"type":"type","text":"hello"}                                     Type into already-focused element
-key              {"type":"key","key":"Enter"}                                       Enter|Tab|Escape|Backspace|Delete|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Space
-select           {"type":"select","ref":5,"value":"option_value"}                   Select dropdown option by value
-scroll           {"type":"scroll","x":400,"y":400,"deltaX":0,"deltaY":500}          Scroll at (x,y). +deltaY=down, -deltaY=up.
+focus_and_type   {"type":"focus_and_type","ref":5,"text":"hello","clear":true}      Click then type. clear:true replaces text.
+type             {"type":"type","text":"hello"}                                     Type into focused field
+key              {"type":"key","key":"Enter"}                                       Enter|Tab|Escape|Backspace|Delete|ArrowUp/Down/Left/Right|Space
+select           {"type":"select","ref":5,"value":"option_value"}
+scroll           {"type":"scroll","x":400,"y":400,"deltaX":0,"deltaY":500}          +deltaY=down, -deltaY=up
 navigate         {"type":"navigate","url":"https://..."}
-back             {"type":"back"}
-forward          {"type":"forward"}
-wait             {"type":"wait","duration":1000}                                     Wait for content to load or page to settle (ms). Use when page is loading or elements aren't visible yet.
-extract_text     {"type":"extract_text","ref":5}                                     Read text content of element
+back/forward     {"type":"back"} or {"type":"forward"}
+wait             {"type":"wait","duration":1000}
+extract_text     {"type":"extract_text","ref":5}
+screenshot       {"type":"screenshot"}                                              Request a screenshot on the NEXT step (use when element list isn't enough)
 new_tab          {"type":"new_tab","url":"https://..."}
 switch_tab       {"type":"switch_tab","tabId":12345}
 close_tab        {"type":"close_tab","tabId":12345}
-click_captcha    {"type":"click_captcha"}                                            Human-like click on CAPTCHA checkbox
-stealth_solve    {"type":"stealth_solve"}                                            Launch stealth browser to bypass Cloudflare
-dismiss_popup    {"type":"dismiss_popup"}                                             Force-close popups/modals/overlays via JS
+click_captcha    {"type":"click_captcha"}                                            Human-like CAPTCHA click
+stealth_solve    {"type":"stealth_solve"}                                            Stealth browser for Cloudflare
+dismiss_popup    {"type":"dismiss_popup"}                                            Force-close popups/modals
 accept_dialog    {"type":"accept_dialog"}
 dismiss_dialog   {"type":"dismiss_dialog"}
-done             {"type":"done","summary":"..."}                                     Task complete or cannot proceed
-ask_user         {"type":"ask_user","question":"..."}                                Pause and ask user for help
+done             {"type":"done","summary":"..."}
+ask_user         {"type":"ask_user","question":"..."}
 </actions>
 
 <context>
-- Elements are grouped by page section (navigation, search, form, dialog, etc.) and listed as [i]<tag>text</tag>. Use the index i as "ref" in actions.
-- The SCREENSHOT is your primary source of truth. Use it to understand page layout, verify action results, and find elements not in the list.
-- You can click coordinates visible in the screenshot even if no matching element is listed.
-- SCROLL CONTAINERS show scrollable areas with center coordinates. Scroll at those coordinates.
-- For credentials, 2FA, or CAPTCHAs you cannot solve: use ask_user. Never guess passwords.
+- Elements are grouped by page section and listed as [i]<tag>text</tag>. Use index i as "ref".
+- A screenshot is included on step 1 and after you request one. Otherwise you work from the element list.
+- PAGE CHANGED marker means the URL changed — review the new element list carefully.
+- SAME PAGE marker means you're on the same URL — elements updated but layout is familiar.
+- SCROLL CONTAINERS show scrollable areas with center coordinates.
+- For credentials, 2FA, or unsolvable CAPTCHAs: use ask_user.
 </context>"""
 
 
@@ -102,6 +98,7 @@ class StartRequest(BaseModel):
 
 class StepRequest(BaseModel):
     image: str | None = None
+    url: str | None = None
     elements: list[dict] | None = None
     scroll_containers: list[dict] | None = None
     popup: dict | None = None
@@ -120,6 +117,8 @@ async def start_session(req: StartRequest):
         "viewport_width": req.viewport_width,
         "viewport_height": req.viewport_height,
         "history": [],
+        "last_url": "",         # Track URL for page-change detection
+        "wants_screenshot": True,  # First step always gets a screenshot
     }
     return {"session_id": session_id}
 
@@ -501,20 +500,37 @@ async def step_session(session_id: str, req: StepRequest):
         tabs_text = _format_agent_tabs(req.agent_tabs)
         loop_text = f"\n⚠ {req.loop_warning}" if req.loop_warning else ""
 
-        has_screenshot = req.image is not None and len(req.image) > 0
-        screenshot_note = "Screenshot:" if has_screenshot else "(Screenshot unavailable)"
+        # ── Page context: detect URL change ──
+        current_url = req.url or ""
+        last_url = session.get("last_url", "")
+        page_changed = current_url != last_url and last_url != ""
+        session["last_url"] = current_url
+
+        if page_changed:
+            page_marker = f"⚡ PAGE CHANGED: {current_url}\n"
+        elif step_num > 1:
+            page_marker = "↻ SAME PAGE\n"
+        else:
+            page_marker = f"URL: {current_url}\n"
+
+        # ── Screenshot: only include when requested or first step ──
+        include_screenshot = session.get("wants_screenshot", False)
+        has_screenshot = include_screenshot and req.image is not None and len(req.image) > 0
+        # Always include on page change (new layout to understand)
+        if page_changed and req.image:
+            has_screenshot = True
+        screenshot_note = "Screenshot attached." if has_screenshot else ""
 
         prompt_text = (
             f"Task: {session['task']}\n"
-            f"Viewport: {session['viewport_width']}x{session['viewport_height']}px\n"
-            f"Step {step_num}\n"
+            f"Step {step_num} | {page_marker}"
             f"{loop_text}\n"
             f"{popup_text}\n"
             f"{captcha_text}\n"
             f"{dialog_text}\n"
             f"{elements_text}\n"
             f"{scroll_text}\n"
-            f"{tabs_text}\n\n"
+            f"{tabs_text}\n"
             f"{screenshot_note}"
         )
 
@@ -527,6 +543,8 @@ async def step_session(session_id: str, req: StepRequest):
                     mime_type="image/jpeg",
                 )
             )
+        # Reset — model must request again if it needs another screenshot
+        session["wants_screenshot"] = False
 
         # ── Debug: save prompt + screenshot to debug/ ──
         step_prefix = f"step_{step_num:03d}"
@@ -561,6 +579,15 @@ async def step_session(session_id: str, req: StepRequest):
         raw_text = _extract_response_text(response)
         result = _extract_json(raw_text)
 
+        # ── Handle screenshot request: model asks for visual context ──
+        action = result.get("action", {})
+        if action.get("type") == "screenshot":
+            session["wants_screenshot"] = True
+            # Don't save to history — this is a meta-action, not a real step
+            print(f"  MODEL REQUESTED SCREENSHOT — will include on next step")
+            print(f"{'='*60}\n")
+            return result
+
         # ── Debug: save response ──
         debug_resp_path = DEBUG_DIR / f"{step_prefix}_response.json"
         debug_resp_path.write_text(json.dumps(result, indent=2))
@@ -569,7 +596,7 @@ async def step_session(session_id: str, req: StepRequest):
         print(f"  {json.dumps(result, indent=2)}")
         print(f"{'='*60}\n")
 
-        # Save to history (only the clean JSON, not thinking)
+        # Save to history
         session["history"].append(Content(role="user", parts=user_parts))
         session["history"].append(
             Content(
