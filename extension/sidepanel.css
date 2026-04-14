@@ -1,23 +1,25 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
 
 :root {
-  --bg: #0C0C14;
-  --surface: #151520;
-  --border: #222233;
+  --bg: #0D0B0F;
+  --surface: #1A1518;
+  --border: #2E2228;
   --text: #FFFFFF;
-  --text-sub: #D5D6DE;
-  --text-muted: #8888AA;
-  --orange: #FF9F43;
+  --text-sub: #E0D6D9;
+  --text-muted: #9A8890;
+  --orange: #FF6F20;
+  --orange-light: #FF8F4C;
+  --orange-glow: rgba(255, 111, 32, 0.15);
   --green: #55EFC4;
   --red: #FF6B6B;
   --yellow: #FECA57;
-  --purple: #A29BFE;
+  --purple: #C49BFF;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
-  font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
+  font-family: 'Poppins', -apple-system, sans-serif;
   background: var(--bg);
   color: var(--text);
   height: 100vh;
@@ -35,8 +37,8 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 10px 16px;
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #1C1418 0%, var(--bg) 100%);
+  border-bottom: 2px solid var(--orange);
   flex-shrink: 0;
 }
 .header-left { display: flex; align-items: center; gap: 10px; }
@@ -293,18 +295,18 @@ body {
 .task-input {
   flex: 1;
   padding: 12px 16px;
-  border: 2px solid #3A3A55;
+  border: 2px solid var(--border);
   border-radius: 12px;
   font-size: 14px;
   font-weight: 600;
   outline: none;
-  font-family: 'Plus Jakarta Sans', -apple-system, sans-serif;
-  background: #1A1A2E;
+  font-family: 'Poppins', -apple-system, sans-serif;
+  background: var(--surface);
   color: #FFFFFF;
   transition: all 0.15s;
 }
-.task-input::placeholder { color: #9090B0; font-weight: 500; }
-.task-input:focus { border-color: var(--orange); background: #1E1E38; }
+.task-input::placeholder { color: var(--text-muted); font-weight: 500; }
+.task-input:focus { border-color: var(--orange); background: #211A1E; }
 .task-input:disabled { opacity: 0.4; }
 
 .send-btn, .stop-btn {
