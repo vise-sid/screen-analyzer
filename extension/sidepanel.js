@@ -422,7 +422,7 @@ async function runAgent(task) {
 
       // Fetch with 30s timeout + abort support
       currentAbortController = new AbortController();
-      const timeoutId = setTimeout(() => currentAbortController.abort(), 30000);
+      const timeoutId = setTimeout(() => currentAbortController.abort(), 90000);
 
       let stepRes;
       try {
@@ -442,12 +442,12 @@ async function runAgent(task) {
         if (fetchErr.name === "AbortError") {
           killRetries++;
           if (killRetries >= 3) {
-            addError("Killed 3 times — skipping this step.");
+            addError("Timed out 3 times — skipping this step.");
             killRetries = 0;
             lastActionType = "wait";
             continue;
           }
-          addLog(`Step killed — retry ${killRetries}/3...`, "log-error");
+          addLog(`Request timed out — retry ${killRetries}/3...`, "log-error");
           continue;
         }
         throw fetchErr;
