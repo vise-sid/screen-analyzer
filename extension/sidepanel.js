@@ -27,7 +27,7 @@ function addThought(result) {
   // New format: single "thought" field
   if (result.thought) {
     addLog(
-      `<div class="thought-label">Thinking</div><div>${escapeHtml(result.thought)}</div>`,
+      `<div class="thought-label">${noto("1f9e0")} THINKING</div><div>${escapeHtml(result.thought)}</div>`,
       "log-thought"
     );
     return;
@@ -45,40 +45,47 @@ function addThought(result) {
   }
   if (parts.length > 0) {
     addLog(
-      `<div class="thought-label">Thinking</div>${parts.join("")}`,
+      `<div class="thought-label">${noto("1f9e0")} THINKING</div>${parts.join("")}`,
       "log-thought"
     );
   }
 }
 
+// Animated Noto Emoji helper
+const NOTO_BASE = "https://fonts.gstatic.com/s/e/notoemoji/latest";
+function noto(code, size = "animated-emoji") {
+  return `<img src="${NOTO_BASE}/${code}/512.gif" class="${size}" />`;
+}
+
 function addAction(action) {
   const icons = {
-    click: "\u{1F5B1}",
-    double_click: "\u{1F5B1}",
-    hover: "\u{1F4A8}",
-    focus_and_type: "\u2328\uFE0F",
-    type: "\u2328\uFE0F",
-    clear_and_type: "\u2328\uFE0F",
-    key: "\u2387",
-    select: "\u{1F4CB}",
-    scroll: "\u2195",
-    navigate: "\u{1F310}",
-    back: "\u2B05",
-    forward: "\u27A1",
-    extract_text: "\u{1F4D6}",
-    new_tab: "\u{1F4C4}",
-    switch_tab: "\u{1F500}",
-    close_tab: "\u274C",
-    click_captcha: "\u{1F916}",
-    stealth_solve: "\u{1F510}",
-    dismiss_popup: "\u{1F6AB}",
-    accept_dialog: "\u2705",
-    dismiss_dialog: "\u274C",
-    ask_user: "\u{1F64B}",
-    wait: "\u23F3",
-    done: "\u2705",
+    click: noto("1f446"),           // pointing up
+    double_click: noto("1f446"),
+    hover: noto("1f441_fe0f"),      // eye
+    focus_and_type: noto("2328_fe0f"), // keyboard
+    type: noto("2328_fe0f"),
+    clear_and_type: noto("2328_fe0f"),
+    key: noto("26a1"),              // lightning
+    select: noto("1f4cb"),          // clipboard
+    scroll: noto("1f5b2_fe0f"),     // trackball
+    navigate: noto("1f30d"),        // globe
+    back: noto("2b05_fe0f"),        // left arrow
+    forward: noto("27a1_fe0f"),     // right arrow
+    extract_text: noto("1f4d6"),    // book
+    screenshot: noto("1f4f7"),      // camera
+    new_tab: noto("2795"),          // plus
+    switch_tab: noto("1f500"),      // shuffle
+    close_tab: noto("274c"),        // cross
+    click_captcha: noto("1f916"),   // robot
+    stealth_solve: noto("1f575_fe0f"), // detective
+    dismiss_popup: noto("1f6ab"),   // prohibited
+    accept_dialog: noto("2705"),    // check
+    dismiss_dialog: noto("274c"),   // cross
+    ask_user: noto("1f64b"),        // raised hand
+    wait: noto("23f3"),             // hourglass
+    done: noto("2705"),             // check
   };
-  const icon = icons[action.type] || "\u25B6";
+  const icon = icons[action.type] || noto("25b6_fe0f");
   const detail = formatAction(action);
   addLog(
     `<span class="action-icon">${icon}</span> <span>${escapeHtml(detail)}</span>`,
@@ -88,7 +95,7 @@ function addAction(action) {
 
 function addDone(summary) {
   addLog(
-    `<div class="done-label">Done</div><div>${escapeHtml(summary)}</div>`,
+    `<div class="done-label">${noto("1f389", "animated-emoji-lg")} MISSION COMPLETE</div><div>${escapeHtml(summary)}</div>`,
     "log-done"
   );
 }
@@ -106,7 +113,7 @@ const LOADING_MSGS = [
 function addLoading() {
   const msg = LOADING_MSGS[Math.floor(Math.random() * LOADING_MSGS.length)];
   return addLog(
-    `<div class="dot-pulse"><span></span><span></span><span></span></div> <span>${msg}</span>`,
+    `${noto("1f440", "animated-emoji-lg")} <span>${msg}</span>`,
     "log-loading"
   );
 }
@@ -494,7 +501,7 @@ async function runAgent(task) {
       if (!result.action) { addError("No action returned by model."); break; }
 
       if (result.action.type === "screenshot") {
-        addLog(`<span class="action-icon">\u{1F4F7}</span> <span>Requesting screenshot...</span>`, "log-action");
+        addLog(`<span class="action-icon">${noto("1f4f7")}</span> <span>Requesting screenshot...</span>`, "log-action");
         continue;
       }
 
@@ -515,10 +522,10 @@ async function runAgent(task) {
         if (!running) { shouldBreak = true; } else { shouldContinue = true; }
       } else if (result.action.type === "stealth_solve") {
         const solveTab = await resolveAgentTab();
-        addLog(`<div class="thought-label">Stealth Solve</div><div>Bypassing Cloudflare...</div>`, "log-thought");
+        addLog(`<div class="thought-label">${noto("1f575_fe0f")} STEALTH MODE</div><div>Bypassing Cloudflare...</div>`, "log-thought");
         const solveResult = await stealthSolve(solveTab.id, solveTab.url, API_BASE);
         if (solveResult.success) {
-          addLog(`<span class="action-icon">\u{1F510}</span> <span>Cloudflare bypassed!</span>`, "log-action");
+          addLog(`<span class="action-icon">${noto("1f510")}</span> <span>Cloudflare bypassed!</span>`, "log-action");
           await detachDebugger();
         } else {
           addError(`Stealth solve failed: ${solveResult.error || "Unknown"}`);
@@ -529,7 +536,7 @@ async function runAgent(task) {
       } else {
         const executed = await executeAction(state.screenshot.tabId, result.action);
         if (executed && executed._extractedText) {
-          addLog(`<div class="thought-label">Extracted Text</div><div>${escapeHtml(executed._extractedText)}</div>`, "log-thought");
+          addLog(`<div class="thought-label">${noto("1f4d6")} EXTRACTED</div><div>${escapeHtml(executed._extractedText)}</div>`, "log-thought");
         }
       }
 
