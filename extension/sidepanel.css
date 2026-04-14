@@ -6,9 +6,9 @@
   --bg-hover: #2C2F3A;
   --bg-input: #2C2F3A;
   --border: #3B3E4A;
-  --text: #EEEFE9;
-  --text-secondary: #B2B3AD;
-  --text-muted: #6B6C66;
+  --text: #FFFFFF;
+  --text-secondary: #D1D5DB;
+  --text-muted: #9CA3AF;
   --orange: #FF8C00;
   --orange-bg: rgba(255, 140, 0, 0.08);
   --orange-border: rgba(255, 140, 0, 0.2);
@@ -185,7 +185,7 @@ body {
   padding: 10px 14px;
   font-size: 13px;
   line-height: 1.45;
-  color: var(--text-secondary);
+  color: var(--text);
   max-width: 88%;
 }
 
@@ -275,7 +275,7 @@ body {
   margin-bottom: 4px;
 }
 
-.ask-user-text { margin-bottom: 10px; color: var(--text); }
+.ask-user-text { margin-bottom: 10px; color: #FFFFFF; }
 
 .resume-btn {
   padding: 8px 16px;
