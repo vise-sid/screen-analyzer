@@ -233,8 +233,36 @@ async function detachDebugger() {
   attachedTabId = null;
 }
 
-function sendCommand(method, params = {}) {
-  return chrome.debugger.sendCommand({ tabId: attachedTabId }, method, params);
+/**
+ * Bound any promise by a timeout so a hung CDP command can't freeze the agent loop.
+ * If the underlying promise settles first, its value (or error) is returned.
+ * Otherwise the returned promise rejects with a timeout error after `ms`.
+ */
+function withTimeout(promise, ms, label = "operation") {
+  let timer = null;
+  const timeoutP = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms
+    );
+  });
+  return Promise.race([promise, timeoutP]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
+ * sendCommand with a hard timeout. CDP calls can hang when the target is
+ * mid-navigation or Chrome auto-detaches the debugger; without a bound,
+ * the whole agent loop can freeze because the promise never settles.
+ * Default 15s — generous enough for slow pages, short enough to recover.
+ */
+function sendCommand(method, params = {}, timeoutMs = 15_000) {
+  return withTimeout(
+    chrome.debugger.sendCommand({ tabId: attachedTabId }, method, params),
+    timeoutMs,
+    `CDP ${method}`
+  );
 }
 
 // ── Element Extraction ──────────────────────────────────────
@@ -757,8 +785,42 @@ async function cdpScroll(x, y, deltaX, deltaY) {
   });
 }
 
+/**
+ * Wait (with timeout) for Page.loadEventFired. This lets callers observe
+ * that the target has finished its main-frame load before issuing more
+ * CDP commands against it.
+ */
+function waitForPageLoad(timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try { chrome.debugger.onEvent.removeListener(listener); } catch (_) {}
+      resolve();
+    };
+    const listener = (source, method) => {
+      if (source.tabId !== attachedTabId) return;
+      if (method === "Page.loadEventFired" || method === "Page.frameStoppedLoading") {
+        finish();
+      }
+    };
+    chrome.debugger.onEvent.addListener(listener);
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+/**
+ * Navigate the attached tab and wait for the main-frame load event before
+ * returning. Bounded at 8s — if the page never fires load (slow SPAs), we
+ * proceed anyway and let the next waitForPageReady smooth it out.
+ */
 async function cdpNavigate(url) {
+  // Make sure Page events are enabled so loadEventFired is delivered to us.
+  try { await sendCommand("Page.enable"); } catch (_) {}
+  const loadP = waitForPageLoad(8000);
   await sendCommand("Page.navigate", { url });
+  await loadP;
 }
 
 async function cdpGoBack() {

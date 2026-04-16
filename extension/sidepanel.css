@@ -351,3 +351,130 @@ body {
 }
 
 .hidden { display: none !important; }
+
+/* ═══ SIGN-IN OVERLAY ═══ */
+.signin-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 24px;
+}
+.signin-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  max-width: 320px;
+  width: 100%;
+  padding: 28px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  text-align: center;
+}
+.signin-logo img {
+  width: 56px;
+  height: 56px;
+  image-rendering: pixelated;
+  opacity: 0.95;
+}
+.signin-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  margin: 0;
+}
+.signin-title span { color: var(--orange); }
+.signin-sub {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 4px 0;
+  line-height: 1.4;
+}
+.signin-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 18px;
+  background: var(--text);
+  color: #1f1f1f;
+  border: none;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.08s ease, box-shadow 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.signin-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(255, 111, 32, 0.25);
+}
+.signin-btn:disabled { opacity: 0.7; cursor: wait; }
+.signin-error {
+  color: var(--red);
+  font-size: 12px;
+  margin: 0;
+  min-height: 16px;
+}
+.signin-footer {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 8px;
+  letter-spacing: 0.02em;
+}
+
+/* ═══ APP SHELL ═══ */
+.app-shell {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* ═══ USER CHIP ═══ */
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  max-width: 150px;
+}
+.user-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--border);
+}
+.user-name {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-sub);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+.user-signout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+}
+.user-signout:hover { color: var(--orange); background: var(--orange-glow); }

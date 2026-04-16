@@ -8,6 +8,16 @@ const newChatBtn = document.getElementById("newChatBtn");
 const logArea = document.getElementById("logArea");
 const placeholder = document.getElementById("placeholder");
 
+// Sign-in UI elements
+const signinOverlay = document.getElementById("signinOverlay");
+const signinBtn = document.getElementById("signinBtn");
+const signinError = document.getElementById("signinError");
+const appShell = document.getElementById("appShell");
+const userChip = document.getElementById("userChip");
+const userAvatar = document.getElementById("userAvatar");
+const userName = document.getElementById("userName");
+const signoutBtn = document.getElementById("signoutBtn");
+
 let sessionId = null;
 let running = false;
 let currentAbortController = null; // For killing stuck requests
@@ -477,8 +487,8 @@ async function runAgent(task) {
     const initialTab = await resolveAgentTab();
     const initial = await captureScreenshot(initialTab);
 
-    // Start session
-    const startRes = await fetch(`${API_BASE}/session/start`, {
+    // Start session (authenticated — attaches Bearer ID token)
+    const startRes = await apiFetch(`${API_BASE}/session/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -488,6 +498,17 @@ async function runAgent(task) {
       }),
     });
 
+    if (startRes.status === 401) {
+      addError("You're signed out. Sign in to continue.");
+      await signOut();
+      showSignIn();
+      return;
+    }
+    if (startRes.status === 429) {
+      const body = await startRes.json().catch(() => ({}));
+      addError(body.detail || "Daily usage limit reached.");
+      return;
+    }
     if (!startRes.ok) throw new Error("Failed to start session");
     const { session_id } = await startRes.json();
     sessionId = session_id;
@@ -525,7 +546,36 @@ async function runAgent(task) {
       // ── Timing: track every phase ──
       const t0 = performance.now();
 
-      const state = await captureState(true);
+      // Bound captureState — CDP commands can hang if the debugger is in a
+      // weird state post-navigation. On timeout we detach and try once more.
+      let state;
+      const CAPTURE_TIMEOUT_MS = 30_000;
+      const captureWithTimeout = () =>
+        Promise.race([
+          captureState(true),
+          new Promise((_, rej) =>
+            setTimeout(() => rej(new Error("captureState timeout")), CAPTURE_TIMEOUT_MS)
+          ),
+        ]);
+      try {
+        state = await captureWithTimeout();
+      } catch (capErr) {
+        console.warn("captureState failed, resetting debugger:", capErr.message);
+        addLog("Page capture stalled — resetting browser connection...", "log-error");
+        try { await detachDebugger(); } catch (_) {}
+        try {
+          state = await captureWithTimeout();
+        } catch (capErr2) {
+          consecutiveFailures++;
+          if (consecutiveFailures >= 3) {
+            addError("Cannot read page after 3 tries. Stopping.");
+            break;
+          }
+          addLog(`Capture retry ${consecutiveFailures}/3...`, "log-error");
+          await sleep(1000);
+          continue;
+        }
+      }
       const tCapture = performance.now();
 
       // Get FRESH tab info for URL (after page load, not cached)
@@ -565,7 +615,7 @@ async function runAgent(task) {
       const tApiStart = performance.now();
       let stepRes;
       try {
-        stepRes = await fetch(`${API_BASE}/session/${sessionId}/step`, {
+        stepRes = await apiFetch(`${API_BASE}/session/${sessionId}/step`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(requestBody),
@@ -590,6 +640,17 @@ async function runAgent(task) {
 
       loadingEl.remove();
 
+      if (stepRes.status === 401) {
+        addError("You're signed out. Sign in to continue.");
+        await signOut();
+        showSignIn();
+        break;
+      }
+      if (stepRes.status === 429) {
+        const body = await stepRes.json().catch(() => ({}));
+        addError(body.detail || "Daily usage limit reached.");
+        break;
+      }
       if (!stepRes.ok) {
         consecutiveFailures++;
         if (consecutiveFailures >= 3) { addError("3 consecutive server errors. Stopping."); break; }
@@ -826,7 +887,7 @@ async function runAgent(task) {
     stopPopupDetection();
     await cleanupTabManager();
     if (sessionId) {
-      fetch(`${API_BASE}/session/${sessionId}`, { method: "DELETE" }).catch(
+      apiFetch(`${API_BASE}/session/${sessionId}`, { method: "DELETE" }).catch(
         () => {}
       );
       sessionId = null;
@@ -873,3 +934,107 @@ newChatBtn.addEventListener("click", () => {
   taskInput.value = "";
   taskInput.focus();
 });
+
+// ── Sign-in bootstrap ───────────────────────────────────────
+
+function showSignIn() {
+  if (signinOverlay) signinOverlay.classList.remove("hidden");
+  if (appShell) appShell.classList.add("hidden");
+}
+
+function hideSignIn() {
+  if (signinOverlay) signinOverlay.classList.add("hidden");
+  if (appShell) appShell.classList.remove("hidden");
+}
+
+function renderUserChip(user) {
+  if (!userChip || !user) return;
+  if (userAvatar) {
+    if (user.picture) {
+      userAvatar.src = user.picture;
+      userAvatar.classList.remove("hidden");
+    } else {
+      userAvatar.classList.add("hidden");
+    }
+  }
+  if (userName) {
+    userName.textContent = user.name || user.email || "Signed in";
+  }
+  userChip.classList.remove("hidden");
+}
+
+function clearUserChip() {
+  if (!userChip) return;
+  userChip.classList.add("hidden");
+  if (userName) userName.textContent = "";
+  if (userAvatar) userAvatar.src = "";
+}
+
+async function handleSignIn() {
+  if (signinError) signinError.textContent = "";
+  if (signinBtn) {
+    signinBtn.disabled = true;
+    signinBtn.textContent = "Signing in…";
+  }
+  try {
+    const token = await getGoogleIdToken({ interactive: true });
+    if (!token) {
+      if (signinError) signinError.textContent = "Sign-in cancelled or failed. Try again.";
+      return;
+    }
+    // Confirm with backend — also populates the users table and returns usage.
+    const resp = await apiFetch(`${API_BASE}/me`);
+    if (!resp.ok) {
+      if (signinError) signinError.textContent = `Backend rejected token (${resp.status}).`;
+      await signOut();
+      return;
+    }
+    const me = await resp.json();
+    renderUserChip(me);
+    hideSignIn();
+  } catch (err) {
+    console.error(err);
+    if (signinError) signinError.textContent = err.message || "Unexpected error.";
+  } finally {
+    if (signinBtn) {
+      signinBtn.disabled = false;
+      signinBtn.textContent = "Sign in with Google";
+    }
+  }
+}
+
+async function handleSignOut() {
+  if (running) return;
+  await signOut();
+  clearUserChip();
+  clearLog();
+  showSignIn();
+}
+
+async function bootstrapAuth() {
+  // Try silent restore — only shows the consent screen if we can't refresh quietly.
+  const cached = await getCachedUser();
+  if (cached) renderUserChip(cached);
+
+  const token = await getGoogleIdToken({ interactive: false });
+  if (token) {
+    // Validate with backend so we capture the canonical user record and usage.
+    try {
+      const resp = await apiFetch(`${API_BASE}/me`);
+      if (resp.ok) {
+        const me = await resp.json();
+        renderUserChip(me);
+        hideSignIn();
+        return;
+      }
+    } catch (_) {}
+  }
+  clearUserChip();
+  showSignIn();
+}
+
+if (signinBtn) signinBtn.addEventListener("click", handleSignIn);
+if (signoutBtn) signoutBtn.addEventListener("click", handleSignOut);
+
+// Kick off auth check as soon as the sidepanel loads.
+bootstrapAuth();

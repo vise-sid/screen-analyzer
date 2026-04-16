@@ -7,7 +7,7 @@ from pathlib import Path
 
 from bs4 import BeautifulSoup, Comment
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from google import genai
@@ -16,6 +16,11 @@ from markdownify import markdownify as md
 from pydantic import BaseModel
 
 load_dotenv()
+
+# Auth + usage accounting (local modules — see backend/auth.py, db.py, usage.py)
+from auth import AuthenticatedUser, get_current_user  # noqa: E402
+from db import get_user_usage_summary  # noqa: E402
+from usage import QuotaExceeded, check_quota, record_llm_call  # noqa: E402
 
 app = FastAPI()
 
@@ -116,9 +121,19 @@ Respond EXACTLY one of:
 - INCOMPLETE: [what missing + specific next action]"""
 
 
-def _call_advisor(prompt: str) -> str | None:
+def _call_advisor(
+    prompt: str,
+    *,
+    user_sub: str | None = None,
+    session_id: str | None = None,
+    purpose: str = "advisor",
+) -> str | None:
     """Call the advisor model (Gemini Pro) for strategic guidance.
-    Returns the text response, or None if the call fails."""
+    Returns the text response, or None if the call fails.
+
+    Usage is attributed to user_sub when provided, otherwise skipped
+    (shouldn't happen in production — endpoints always pass a user).
+    """
     try:
         response = client.models.generate_content(
             model=ADVISOR_MODEL,
@@ -127,6 +142,14 @@ def _call_advisor(prompt: str) -> str | None:
             ),
             contents=prompt,
         )
+        if user_sub:
+            record_llm_call(
+                response=response,
+                user_sub=user_sub,
+                model=ADVISOR_MODEL,
+                session_id=session_id,
+                purpose=purpose,
+            )
         text = response.text
         if text and text.strip():
             print(f"  ADVISOR ({ADVISOR_MODEL}): {text[:200]}...")
@@ -274,7 +297,16 @@ class StepRequest(BaseModel):
 
 
 @app.post("/session/start")
-async def start_session(req: StartRequest):
+async def start_session(
+    req: StartRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    # Refuse to start a session if the user has blown their daily cap.
+    try:
+        check_quota(user.sub)
+    except QuotaExceeded as qe:
+        raise HTTPException(status_code=429, detail=str(qe))
+
     session_id = str(uuid.uuid4())
 
     # ── Flash self-plans via a "plan" action on step 0 ──
@@ -286,6 +318,8 @@ async def start_session(req: StartRequest):
         "task": req.task,
         "viewport_width": req.viewport_width,
         "viewport_height": req.viewport_height,
+        "user_sub": user.sub,      # Attribute all LLM calls in this session to this user
+        "user_email": user.email,
         "model_outputs": [],       # Model's thought+action from each step
         "action_results": [],      # Parallel list: action result for each step (None if none)
         "memory": {},              # Session memory: key → {"data": str, "step": int, "size": int}
@@ -298,6 +332,18 @@ async def start_session(req: StartRequest):
         "step_count": 0,
     }
     return {"session_id": session_id}
+
+
+@app.get("/me")
+async def me(user: AuthenticatedUser = Depends(get_current_user)):
+    """Current user profile + usage summary. Lightweight; safe to poll."""
+    return {
+        "sub": user.sub,
+        "email": user.email,
+        "name": user.name,
+        "picture": user.picture,
+        "usage": get_user_usage_summary(user.sub),
+    }
 
 
 def _format_elements(elements: list[dict] | None, is_canvas: bool) -> str:
@@ -1038,10 +1084,24 @@ def _extract_response_text(response) -> str:
 
 
 @app.post("/session/{session_id}/step")
-async def step_session(session_id: str, req: StepRequest):
+async def step_session(
+    session_id: str,
+    req: StepRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     session = sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # A session belongs to the user who started it. Reject cross-user access.
+    if session.get("user_sub") and session["user_sub"] != user.sub:
+        raise HTTPException(status_code=403, detail="Session does not belong to this user")
+
+    # Gate every step on the user's daily cap.
+    try:
+        check_quota(user.sub)
+    except QuotaExceeded as qe:
+        raise HTTPException(status_code=429, detail=str(qe))
 
     try:
         session["step_count"] += 1
@@ -1098,7 +1158,12 @@ async def step_session(session_id: str, req: StepRequest):
                 problem=req.loop_warning,
                 memory_keys=memory_keys,
             )
-            advice = _call_advisor(replan_prompt)
+            advice = _call_advisor(
+                replan_prompt,
+                user_sub=user.sub,
+                session_id=session_id,
+                purpose="advisor_replan",
+            )
             if advice:
                 session["advisor_calls"] = session.get("advisor_calls", 0) + 1
                 if advice.strip().startswith("ANSWER NOW:"):
@@ -1277,6 +1342,14 @@ async def step_session(session_id: str, req: StepRequest):
             ),
             contents=contents,
         )
+        # Attribute this call to the signed-in user. One row per step.
+        record_llm_call(
+            response=response,
+            user_sub=user.sub,
+            model=EXECUTOR_MODEL,
+            session_id=session_id,
+            purpose="executor_step",
+        )
 
         raw_text = _extract_response_text(response)
         result = _extract_json(raw_text)
@@ -1325,7 +1398,12 @@ async def step_session(session_id: str, req: StepRequest):
                 f"Memory: {memory_keys}\n"
                 f"Step: {step_num}"
             )
-            advice = _call_advisor(advisor_context)
+            advice = _call_advisor(
+                advisor_context,
+                user_sub=user.sub,
+                session_id=session_id,
+                purpose="advisor_ask",
+            )
             session["advisor_calls"] = session.get("advisor_calls", 0) + 1
             if advice:
                 result["_advisor_response"] = advice

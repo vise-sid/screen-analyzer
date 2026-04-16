@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuoNgpq3EDcb7uVnv6WIiXPkaVnPYNpqXd3pI7d7PV57oE8JmAV+DgnY6b0x9sZKrymjcOPmswg6WHmQG3aDxB+mVvqczweWYGLwTfjEUPfAO8siHPPktyQwgmPGEKE0BQBjtbi6Yc6jY0sJSki1Z8A2ZUJE/5QuVl/PEM/vtyX+cb/x3joPdCdwNKcdiOJbCRJIahqmImrWWKxHVGriAV5PqOXBdS8zbcqUe6hORrJnFeAwlPe1V9oKRy408LDt194YbnarJ9OXbmbqhvuEUCKw5ppEAH+ZEcatFzhPAi78r1oZKff4zZ9/CVqcxOpDyTl9PoB6Eyd//mnCfXNnpfwIDAQAB",
   "name": "PixelFoxx",
   "version": "2.1.0",
   "description": "AI browser agent that navigates and automates tasks for you — pixelfoxx.io",
-  "permissions": ["activeTab", "sidePanel", "tabs", "tabGroups", "debugger", "cookies", "identity"],
+  "permissions": ["activeTab", "sidePanel", "tabs", "tabGroups", "debugger", "cookies", "identity", "storage"],
   "host_permissions": ["<all_urls>"],
   "oauth2": {
     "client_id": "412083714557-qpevl23i9prs3s2fngs90j6eaccb3rg5.apps.googleusercontent.com",
