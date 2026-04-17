@@ -7,26 +7,101 @@
 let attachedTabId = null;
 let elementMap = {};
 
-// ── Network Interception for Scraping ───────────────────────
-let capturedNetworkJson = [];  // Captured JSON API responses
+// ══════════════════════════════════════════════════════════════
+// Network Interception (Phase 3)
+//
+// Two co-operating stores:
+//   1. capturedNetworkJson — legacy metadata list used by the agent's
+//      on-demand `cdpScrapeNetwork()` helper. Unchanged behavior.
+//   2. inflightRequests + networkLog — the Phase-3 capture pipeline.
+//      `inflightRequests` tracks requests from `requestWillBeSent` to
+//      `loadingFinished`/`loadingFailed`. On completion we fetch the
+//      response body and emit a `kind: "network"` envelope to background,
+//      which enriches it with parentActionId and forwards to the sidepanel.
+//
+// Safety model:
+//   - Request bodies: *keys-only*. Values replaced with "[VALUE]". Never
+//     captured verbatim. Zero-risk redaction by construction.
+//   - Response bodies: values preserved; field-name regex redacts any
+//     key matching the credential pattern; 8KB cap.
+//   - URL query params: param values redacted if name matches pattern.
+//   - Headers: never emitted in V1.
+// ══════════════════════════════════════════════════════════════
+
+let capturedNetworkJson = [];  // Legacy: metadata list for cdpScrapeNetwork
 const MAX_NETWORK_CAPTURES = 50;
+
+const inflightRequests = new Map(); // requestId → { method, url, ts, type, mimeType?, status?, captureResponseBody?, requestBody?, requestBodyKind? }
+const networkLog       = new Map(); // requestId → completed envelope payload
+const MAX_INFLIGHT       = 500;
+const MAX_LOG            = 200;
+const REQUEST_MAX_AGE_MS = 60_000;
+
+const REDACT_NAME_RE = /(?:password|passwd|pwd|pin|cvv|cvc|otp|secret|token|auth|bearer|session|api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|private[_-]?key|credit[_-]?card|card[_-]?num(?:ber)?|ssn|tax[_-]?id|gstin|pan|aadhaa?r|routing[_-]?number|account[_-]?number|client[_-]?secret)/i;
+
+const NETWORK_SKIP_HOSTS = new Set([
+  "pixelfoxx.io", "localhost", "127.0.0.1",
+  "google-analytics.com", "googletagmanager.com", "doubleclick.net",
+  "googleadservices.com", "facebook.net", "connect.facebook.net",
+  "segment.io", "mixpanel.com", "amplitude.com",
+  "heap.io", "heapanalytics.com",
+  "hotjar.com", "fullstory.com", "logrocket.com", "clarity.ms",
+  "sentry.io", "datadoghq.com",
+  "nr-data.net", "new-relic.com",
+  "bugsnag.com", "rollbar.com",
+  "intercom.io", "intercomcdn.com",
+  "launchdarkly.com", "optimizely.com",
+  "cloudflareinsights.com",
+]);
+const NETWORK_SKIP_TYPES = new Set([
+  "Image", "Stylesheet", "Font", "Media", "Manifest", "Ping",
+  "CSPViolationReport", "WebSocket", "Other",
+]);
+const NETWORK_SKIP_EXT_RE = /\.(?:js|css|woff2?|ttf|map|png|jpe?g|webp|svg|gif|ico)(?:\?|$)/i;
+const BODY_MAX_BYTES = 8 * 1024;
 
 // Track when Chrome auto-detaches the debugger (cross-origin navigation, tab close, etc.)
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === attachedTabId) {
     console.log(`Debugger auto-detached from tab ${source.tabId}: ${reason}`);
     attachedTabId = null;
-    capturedNetworkJson = [];  // Clear captures on detach
+    capturedNetworkJson = [];
+    inflightRequests.clear();
+    networkLog.clear();
   }
 });
 
-// Listen for CDP events (network responses)
+// Listen for CDP events (network capture pipeline + navigation resets)
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId !== attachedTabId) return;
+
+  if (method === "Network.requestWillBeSent") {
+    // Legacy: clear the metadata list on main-frame doc navigation
+    if (params.type === "Document" && params.frameId === params.loaderId) {
+      capturedNetworkJson = [];
+    }
+    pruneInflight();
+    if (shouldSkipRequest(params)) return;
+    inflightRequests.set(params.requestId, {
+      method: params.request?.method || "GET",
+      url: params.request?.url || "",
+      ts: Date.now(),
+      type: params.type,
+      requestBody: summarizeRequestBody(params.request),
+      requestBodyKind: classifyBodyKind(params.request),
+    });
+    if (inflightRequests.size > MAX_INFLIGHT) {
+      const firstKey = inflightRequests.keys().next().value;
+      inflightRequests.delete(firstKey);
+    }
+    return;
+  }
 
   if (method === "Network.responseReceived") {
     const resp = params.response;
     const contentType = resp.mimeType || resp.headers?.["content-type"] || "";
+
+    // Legacy metadata list (used by cdpScrapeNetwork)
     if (contentType.includes("json")) {
       capturedNetworkJson.push({
         requestId: params.requestId,
@@ -35,16 +110,43 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
         mimeType: contentType,
         timestamp: Date.now(),
       });
-      // Cap at max entries
       if (capturedNetworkJson.length > MAX_NETWORK_CAPTURES) {
         capturedNetworkJson = capturedNetworkJson.slice(-MAX_NETWORK_CAPTURES);
       }
     }
+
+    // Phase-3 pipeline: merge response metadata into the inflight entry.
+    const pending = inflightRequests.get(params.requestId);
+    if (!pending) return;
+    pending.status = resp.status;
+    pending.mimeType = contentType;
+    pending.captureResponseBody = /json|text|xml|javascript/.test(contentType);
+
+    // SSE streams never fire loadingFinished — treat as completed now.
+    if (/text\/event-stream/.test(contentType)) {
+      inflightRequests.delete(params.requestId);
+      finalizeNetworkEvent(params.requestId, pending, { failed: false, skipBody: true });
+    }
+    return;
   }
 
-  // Clear captures on main frame navigation (new page)
-  if (method === "Network.requestWillBeSent" && params.type === "Document" && params.frameId === params.loaderId) {
-    capturedNetworkJson = [];
+  if (method === "Network.loadingFinished") {
+    const pending = inflightRequests.get(params.requestId);
+    if (!pending) return;
+    inflightRequests.delete(params.requestId);
+    finalizeNetworkEvent(params.requestId, pending, { failed: false });
+    return;
+  }
+
+  if (method === "Network.loadingFailed") {
+    const pending = inflightRequests.get(params.requestId);
+    if (!pending) return;
+    inflightRequests.delete(params.requestId);
+    finalizeNetworkEvent(params.requestId, pending, {
+      failed: true,
+      errorText: params.errorText || null,
+    });
+    return;
   }
 });
 
@@ -56,8 +158,14 @@ async function attachDebugger(tabId) {
   await chrome.debugger.attach({ tabId }, "1.3");
   attachedTabId = tabId;
 
-  // Enable network interception for JSON API capture
-  await sendCommand("Network.enable");
+  // Enable network interception for JSON API capture.
+  //
+  // `maxPostDataSize` must be set explicitly — without it, Chrome's default
+  // is too small (often effectively 0) and `requestWillBeSent.request.postData`
+  // ends up undefined for most POSTs. That silently defeats Phase-3 request-body
+  // capture. 64 KiB covers virtually all real API call bodies; larger bodies
+  // fall back to `request.hasPostData: true` with no body (acceptable loss).
+  await sendCommand("Network.enable", { maxPostDataSize: 65536 });
   capturedNetworkJson = [];  // Fresh start
 
   // Apply stealth patches to avoid anti-bot detection
@@ -263,6 +371,269 @@ function sendCommand(method, params = {}, timeoutMs = 15_000) {
     timeoutMs,
     `CDP ${method}`
   );
+}
+
+// ══════════════════════════════════════════════════════════════
+// Network Capture Helpers (Phase 3)
+// ══════════════════════════════════════════════════════════════
+
+/** Decide whether a Network.requestWillBeSent event is worth capturing. */
+function shouldSkipRequest(params) {
+  if (!params || !params.request) return true;
+  if (NETWORK_SKIP_TYPES.has(params.type)) return true;
+  const req = params.request;
+  if (req.method === "OPTIONS") return true;
+  let host = "";
+  let path = "";
+  try {
+    const u = new URL(req.url);
+    host = u.hostname || "";
+    path = u.pathname || "";
+  } catch (_) {
+    return true; // unparseable URL — skip
+  }
+  if (!host) return true;
+  if (NETWORK_SKIP_HOSTS.has(host)) return true;
+  if (NETWORK_SKIP_EXT_RE.test(path)) return true;
+  return false;
+}
+
+/** Remove inflight entries older than the age cap. */
+function pruneInflight() {
+  const cutoff = Date.now() - REQUEST_MAX_AGE_MS;
+  for (const [id, entry] of inflightRequests) {
+    if (entry.ts < cutoff) inflightRequests.delete(id);
+  }
+  // Hard bail on runaway growth
+  if (inflightRequests.size > 1000) {
+    const overflow = inflightRequests.size;
+    inflightRequests.clear();
+    try {
+      chrome.runtime.sendMessage({
+        type: "pixelfoxx_network",
+        event: {
+          source: "cdp",
+          kind: "system",
+          actor: "system",
+          ts: Date.now(),
+          tabId: attachedTabId,
+          payload: { text: `Network capture overflow: ${overflow} pending requests reset.` },
+        },
+      }).catch(() => {});
+    } catch (_) {}
+  }
+}
+
+/** Redact query-string values whose param name matches the credential regex. */
+function redactUrl(url) {
+  if (!url) return url;
+  try {
+    const u = new URL(url);
+    const keys = [...u.searchParams.keys()];
+    for (const k of keys) {
+      if (REDACT_NAME_RE.test(k)) {
+        u.searchParams.set(k, "[REDACTED]");
+      }
+    }
+    return u.toString();
+  } catch (_) {
+    return url;
+  }
+}
+
+/**
+ * Recursively replace every leaf with "[VALUE]". Preserves object keys.
+ * For arrays we keep ONE exemplar (the first element, recursively stripped)
+ * so the advisor can still see what shape the items have — important when
+ * an endpoint returns/receives `[{"id": 1, "name": "x"}, ...]` and we want
+ * the advisor to know each item has an `id` and `name`. Length is NOT
+ * preserved (a 3-element array and a 3000-element array both render as
+ * one-exemplar), so array size isn't leaked.
+ */
+function keysOnly(node) {
+  if (node === null) return null;
+  if (Array.isArray(node)) {
+    if (node.length === 0) return [];
+    return [keysOnly(node[0])];
+  }
+  if (typeof node === "object") {
+    const out = {};
+    for (const k of Object.keys(node)) {
+      out[k] = keysOnly(node[k]);
+    }
+    return out;
+  }
+  // Primitives (string, number, boolean, undefined) → placeholder
+  return "[VALUE]";
+}
+
+/** Walk a response JSON tree and redact values of credential-named keys. */
+function redactResponseJson(node) {
+  if (node === null) return null;
+  if (Array.isArray(node)) return node.map(redactResponseJson);
+  if (typeof node === "object") {
+    const out = {};
+    for (const k of Object.keys(node)) {
+      out[k] = REDACT_NAME_RE.test(k) ? "[REDACTED]" : redactResponseJson(node[k]);
+    }
+    return out;
+  }
+  return node;
+}
+
+/** Parse URL-encoded body and return { key → "[VALUE]" }. */
+function parseUrlEncoded(raw) {
+  const out = {};
+  if (!raw) return out;
+  try {
+    const params = new URLSearchParams(raw);
+    for (const k of params.keys()) {
+      out[k] = "[VALUE]";
+    }
+  } catch (_) {}
+  return out;
+}
+
+/** Parse multipart body: extract field names and file filenames only. */
+function parseMultipartFieldNames(raw, contentType) {
+  const out = {};
+  if (!raw || !contentType) return out;
+  const m = contentType.match(/boundary=(?:"?)([^;"]+)/i);
+  if (!m) return out;
+  const boundary = "--" + m[1];
+  const parts = raw.split(boundary);
+  for (const part of parts) {
+    const headerEnd = part.indexOf("\r\n\r\n");
+    if (headerEnd < 0) continue;
+    const headers = part.slice(0, headerEnd);
+    const disp = headers.match(/Content-Disposition:\s*form-data;\s*([^\r\n]+)/i);
+    if (!disp) continue;
+    const nameMatch = disp[1].match(/name="([^"]+)"/i);
+    if (!nameMatch) continue;
+    const name = nameMatch[1];
+    const fileMatch = disp[1].match(/filename="([^"]*)"/i);
+    out[name] = fileMatch ? `[FILE:${fileMatch[1] || "unnamed"}]` : "[VALUE]";
+  }
+  return out;
+}
+
+/** Classify request-body kind for a params.request object. */
+function classifyBodyKind(request) {
+  if (!request || !request.postData) return null;
+  const headers = request.headers || {};
+  const ct = (
+    headers["Content-Type"] || headers["content-type"] || ""
+  ).toLowerCase();
+  if (ct.includes("application/json") || /^[\[\{]/.test((request.postData || "").trim())) {
+    return "json";
+  }
+  if (ct.includes("application/x-www-form-urlencoded")) return "urlencoded";
+  if (ct.includes("multipart/form-data")) return "multipart";
+  return "other";
+}
+
+/**
+ * Build a SAFE keys-only representation of a request body. Never emits
+ * raw values — this is the load-bearing safety guarantee.
+ */
+function summarizeRequestBody(request) {
+  if (!request || !request.postData) return null;
+  const headers = request.headers || {};
+  const ct = (
+    headers["Content-Type"] || headers["content-type"] || ""
+  ).toLowerCase();
+  const raw = request.postData;
+  try {
+    if (ct.includes("application/json") || /^[\[\{]/.test(raw.trim())) {
+      const parsed = JSON.parse(raw);
+      return keysOnly(parsed);
+    }
+    if (ct.includes("application/x-www-form-urlencoded")) {
+      return parseUrlEncoded(raw);
+    }
+    if (ct.includes("multipart/form-data")) {
+      return parseMultipartFieldNames(raw, ct);
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Complete a network capture: fetch response body (if capturable), redact,
+ * and emit an envelope to background. Deleting from inflightRequests is
+ * the caller's responsibility (done before calling this).
+ */
+async function finalizeNetworkEvent(requestId, pending, opts) {
+  const { failed = false, errorText = null, skipBody = false } = opts || {};
+  let responseBody = null;
+  let responseTruncated = false;
+
+  if (!failed && !skipBody && pending.captureResponseBody) {
+    try {
+      const r = await sendCommand("Network.getResponseBody", { requestId }, 5_000);
+      if (r && !r.base64Encoded && typeof r.body === "string") {
+        let raw = r.body;
+        if (raw.length > BODY_MAX_BYTES) {
+          raw = raw.slice(0, BODY_MAX_BYTES);
+          responseTruncated = true;
+        }
+        // JSON responses: parse + redact field-named values; fall back to raw.
+        const mt = pending.mimeType || "";
+        if (mt.includes("json")) {
+          try {
+            const parsed = JSON.parse(raw);
+            responseBody = JSON.stringify(redactResponseJson(parsed));
+          } catch (_) {
+            responseBody = raw;
+          }
+        } else {
+          responseBody = raw;
+        }
+      }
+    } catch (_) {
+      // body unavailable (evicted, detached, etc.) — skip silently
+    }
+  }
+
+  const record = {
+    requestId,
+    url: redactUrl(pending.url),
+    method: pending.method,
+    status: pending.status ?? null,
+    mimeType: pending.mimeType ?? null,
+    requestBody: pending.requestBody ?? null,
+    requestBodyKind: pending.requestBodyKind ?? null,
+    responseBody,
+    responseTruncated,
+    failed,
+    errorText,
+    startedAt: pending.ts,
+    durationMs: Date.now() - pending.ts,
+  };
+
+  // Cache for agent's cdpScrapeNetwork reuse
+  networkLog.set(requestId, record);
+  if (networkLog.size > MAX_LOG) {
+    const firstKey = networkLog.keys().next().value;
+    networkLog.delete(firstKey);
+  }
+
+  // Forward to background for enrichment (parentActionId via sliding window)
+  try {
+    chrome.runtime.sendMessage({
+      type: "pixelfoxx_network",
+      event: {
+        source: "cdp",
+        kind: "network",
+        actor: "user",
+        ts: record.startedAt,
+        tabId: attachedTabId,
+        target: null,
+        context: { url: null },
+        payload: record,
+      },
+    }).catch(() => {});
+  } catch (_) {}
 }
 
 // ── Element Extraction ──────────────────────────────────────

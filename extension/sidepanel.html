@@ -4,17 +4,24 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PixelFoxx</title>
+  <!-- Miranda Sans (primary typeface) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Miranda+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500;1,600;1,700&display=swap"
+    rel="stylesheet"
+  >
   <link rel="stylesheet" href="sidepanel.css">
 </head>
 <body>
-  <!-- Sign-in overlay — shown until the user is authenticated -->
+  <!-- Sign-in overlay -->
   <div id="signinOverlay" class="signin-overlay">
     <div class="signin-card">
       <div class="signin-logo">
         <img src="icons/icon128.png" alt="PixelFoxx" />
       </div>
-      <h1 class="signin-title">Pixel<span>Foxx</span></h1>
-      <p class="signin-sub">Sign in to start automating the web.</p>
+      <h1 class="signin-title">pixel<span>foxx</span></h1>
+      <p class="signin-sub">Your co-pilot for the browser. Sign in to begin.</p>
       <button id="signinBtn" class="signin-btn">
         <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">
           <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.7 4.7-6.2 8-11.3 8a12 12 0 1 1 0-24c3 0 5.7 1.1 7.8 3l5.7-5.7A20 20 0 1 0 44 24c0-1.2-.1-2.4-.4-3.5z"/>
@@ -25,21 +32,20 @@
         <span>Sign in with Google</span>
       </button>
       <p id="signinError" class="signin-error"></p>
-      <p class="signin-footer">pixelfoxx.io</p>
+      <p class="signin-footer">pixelfoxx · io</p>
     </div>
   </div>
 
-  <!-- Main app shell — hidden until signed in -->
+  <!-- Main app shell -->
   <div id="appShell" class="app-shell hidden">
-    <!-- Header -->
-    <header class="header">
-      <div class="header-left">
-        <div class="logo">
-          <img src="icons/icon48.png" alt="PixelFoxx" />
-        </div>
-        <span class="header-title">Pixel<span>Foxx</span></span>
+
+    <!-- Masthead: wordmark + user -->
+    <header class="masthead">
+      <div class="masthead-brand">
+        <img class="masthead-mark" src="icons/icon48.png" alt="" />
+        <span class="masthead-wordmark">pixel<span>foxx</span></span>
       </div>
-      <div class="header-right">
+      <div class="masthead-right">
         <div id="userChip" class="user-chip hidden">
           <img id="userAvatar" class="user-avatar" alt="" />
           <span id="userName" class="user-name"></span>
@@ -51,48 +57,97 @@
             </svg>
           </button>
         </div>
-        <button id="newChatBtn" class="icon-btn" title="New conversation">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 20h9"/>
-            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+        <button id="newChatBtn" class="icon-btn" title="Start fresh">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12h18"/>
+            <path d="M12 3v18"/>
           </svg>
         </button>
       </div>
     </header>
 
-    <!-- Log Area -->
-    <main class="content" id="logArea">
-      <div id="placeholder" class="placeholder">
-        <div class="placeholder-icon">
-          <img src="icons/icon128.png" style="width: 64px; height: 64px; image-rendering: pixelated; opacity: 0.7;" />
-        </div>
-        <p class="placeholder-text">What are we getting into today?</p>
-        <p class="placeholder-hint">Try: "Book a flight from Mumbai to Delhi for May 10"</p>
+    <!-- State indicator: who's in control, what they're doing -->
+    <div class="state-indicator idle" id="stateIndicator">
+      <span class="state-pulse"></span>
+      <div class="state-copy">
+        <span class="state-actor" id="stateActor">Foxx</span>
+        <span class="state-verb" id="stateVerb">is observing</span>
       </div>
+      <span class="state-timing" id="stateTiming"></span>
+    </div>
+
+    <!-- Stream: the main transcript -->
+    <main class="stream" id="stream">
+
+      <!-- Dossier: which tab Pixel is looking at right now -->
+      <div class="dossier empty" id="dossier" aria-live="polite">
+        <img class="dossier-favicon" id="dossierFavicon" alt="" />
+        <div class="dossier-text">
+          <div class="dossier-host" id="dossierHost">no tab</div>
+          <div class="dossier-title" id="dossierTitle"></div>
+        </div>
+      </div>
+
+      <!-- Chip strip: every tab touched this session, click to filter -->
+      <div class="chip-strip" id="chipStrip" role="tablist" aria-label="Tabs visited"></div>
+
+      <!-- Nav header: back button + breadcrumb shown only in detail views -->
+      <div class="nav-header hidden" id="navHeader">
+        <button class="back-btn" id="backBtn" type="button" aria-label="Back">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="15 18 9 12 15 6"/>
+          </svg>
+        </button>
+        <span class="nav-title" id="navTitle"></span>
+      </div>
+
+      <div class="stream-idle" id="streamIdle">
+        <p class="stream-idle-headline">A quiet page.<br>Nothing recorded yet.</p>
+        <p class="stream-idle-hint">Move around any tab or ask Foxx a question below. Everything you and Foxx do will appear here as a single script.</p>
+      </div>
+      <div class="stream-body" id="timelineBody" role="log"></div>
+
+      <!-- Pill that appears when new events land below the viewport -->
+      <button class="jump-to-latest hidden" id="jumpToLatest" type="button">
+        <span id="jumpToLatestCount">0</span> new
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <polyline points="19 12 12 19 5 12"/>
+        </svg>
+      </button>
     </main>
 
-    <!-- Footer / Input -->
-    <footer class="footer">
-      <div class="input-row">
+    <!-- Legacy log area (hidden) — kept so existing addLog calls don't throw -->
+    <div class="content" id="logArea" aria-hidden="true">
+      <div id="placeholder"></div>
+    </div>
+
+    <!-- Toast tray for errors + system messages -->
+    <div class="toast-tray" id="toastTray" aria-live="polite"></div>
+
+    <!-- Command bar -->
+    <footer class="command-bar">
+      <div class="command-row">
+        <span class="command-prefix">&gt;_</span>
         <input
           type="text"
           id="taskInput"
-          class="task-input"
-          placeholder="What do you need, boss?"
+          class="command-input"
+          placeholder="Describe a task, or ask a question"
           autocomplete="off"
         />
-        <button id="sendBtn" class="send-btn" title="Let's go">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+        <button id="sendBtn" class="command-btn command-send" title="Send">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="5" y1="12" x2="19" y2="12"/>
+            <polyline points="12 5 19 12 12 19"/>
           </svg>
         </button>
-        <button id="stopBtn" class="stop-btn hidden" title="Click: retry. Double-click: stop.">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-            <rect x="6" y="6" width="12" height="12" rx="2"/>
+        <button id="stopBtn" class="command-btn command-stop hidden" title="Stop (double-click to force quit)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="6" width="12" height="12" rx="1.5"/>
           </svg>
         </button>
       </div>
-      <p class="footer-note">pixelfoxx.io</p>
     </footer>
   </div>
 

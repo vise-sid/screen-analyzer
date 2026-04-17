@@ -18,6 +18,28 @@ const userAvatar = document.getElementById("userAvatar");
 const userName = document.getElementById("userName");
 const signoutBtn = document.getElementById("signoutBtn");
 
+// Stream (timeline) + state indicator UI
+const stream = document.getElementById("stream");
+const timelineBody = document.getElementById("timelineBody");
+const streamIdle = document.getElementById("streamIdle");
+const stateIndicator = document.getElementById("stateIndicator");
+const stateActorEl = document.getElementById("stateActor");
+const stateVerbEl = document.getElementById("stateVerb");
+const stateTimingEl = document.getElementById("stateTiming");
+const toastTray = document.getElementById("toastTray");
+
+// Grouped-timeline UI: dossier, chip strip, jump-to-latest pill, nav header
+const dossier = document.getElementById("dossier");
+const dossierFavicon = document.getElementById("dossierFavicon");
+const dossierHost = document.getElementById("dossierHost");
+const dossierTitle = document.getElementById("dossierTitle");
+const chipStrip = document.getElementById("chipStrip");
+const jumpToLatest = document.getElementById("jumpToLatest");
+const jumpToLatestCount = document.getElementById("jumpToLatestCount");
+const navHeader = document.getElementById("navHeader");
+const backBtn = document.getElementById("backBtn");
+const navTitle = document.getElementById("navTitle");
+
 let sessionId = null;
 let running = false;
 let currentAbortController = null; // For killing stuck requests
@@ -107,7 +129,12 @@ function addDone(summary) {
 }
 
 function addError(msg) {
+  // Keep the legacy logArea write so anything inspecting it still works,
+  // but the user-visible surface is now the toast tray.
   addLog(escapeHtml(msg), "log-error");
+  if (typeof showToast === "function") {
+    showToast(String(msg || "Something went wrong"), { tone: "error" });
+  }
 }
 
 const LOADING_MSGS = [
@@ -237,13 +264,39 @@ function setRunning(state) {
   sendBtn.classList.toggle("hidden", state);
   stopBtn.classList.toggle("hidden", !state);
   newChatBtn.classList.toggle("hidden", state);
+  // Reflect in the state indicator
+  if (typeof setState === "function") {
+    if (state) {
+      setState({ actor: "Foxx", verb: "is driving…", mode: "active-agent" });
+    } else if (typeof resetStateIndicator === "function") {
+      resetStateIndicator();
+    }
+  }
+  // Tell background to gate scroll events from the agent's current tab.
+  // CDP scrolls fire with isTrusted:true and would otherwise be captured
+  // as user scrolls; this filters them at the hub.
+  const agentTabId =
+    typeof getActiveAgentTabId === "function" ? getActiveAgentTabId() : null;
+  if (agentTabId != null) {
+    try {
+      chrome.runtime
+        .sendMessage({
+          type: "pixelfoxx_agent_running",
+          tabId: agentTabId,
+          running: state,
+        })
+        .catch(() => {});
+    } catch (_) {}
+  }
 }
 
 function clearLog() {
   while (logArea.lastChild && logArea.lastChild !== placeholder) {
     logArea.removeChild(logArea.lastChild);
   }
-  placeholder.classList.remove("hidden");
+  if (placeholder) placeholder.classList.remove("hidden");
+  // Also wipe the stream/timeline so the new chat starts fresh.
+  if (typeof clearTimeline === "function") clearTimeline();
 }
 
 // ── Pause / Resume ──────────────────────────────────────────
@@ -664,6 +717,9 @@ async function runAgent(task) {
       const result = await stepRes.json();
 
       addThought(result);
+      if (result.thought) {
+        appendAgentTimelineEvent("agent_thought", { text: String(result.thought).slice(0, 200) });
+      }
 
       if (!result.action) { addError("No action returned by model."); break; }
 
@@ -674,6 +730,7 @@ async function runAgent(task) {
 
       actionHistory.push(JSON.stringify(result.action));
       addAction(result.action);
+      appendAgentTimelineEvent("agent_action", { action: result.action });
 
       // ── Execute action ──
       const tExecStart = performance.now();
@@ -682,6 +739,7 @@ async function runAgent(task) {
 
       if (result.action.type === "done") {
         addDone(result.action.summary || "Task complete.");
+        appendAgentTimelineEvent("agent_done", { summary: result.action.summary || "" });
         completed = true;
         shouldBreak = true;
       } else if (result.action.type === "plan") {
@@ -1038,3 +1096,1075 @@ if (signoutBtn) signoutBtn.addEventListener("click", handleSignOut);
 
 // Kick off auth check as soon as the sidepanel loads.
 bootstrapAuth();
+
+// Ask background to emit a tab_activated for the current active tab
+// so the timeline opens with a "You're on <url>" context row.
+try {
+  chrome.runtime
+    .sendMessage({ type: "pixelfoxx_prime" })
+    .catch(() => {});
+} catch (_) {}
+
+/**
+ * Phase 3 — ensure CDP network capture is running on the given tab.
+ *
+ * Reuses `attachDebugger` from actions.js (idempotent: no-op if already
+ * attached to this tabId; auto-detaches from any prior tab first).
+ * Silently swallows attach failures — chrome://, Web Store, PDF viewer
+ * and similar tabs reject CDP attach and that's fine.
+ */
+async function ensureNetworkCapture(tabId) {
+  if (tabId == null) return;
+  if (typeof attachDebugger !== "function") return;
+  try {
+    await attachDebugger(tabId);
+  } catch (_) {
+    // Restricted page or user cancelled the debugger bar — accept silently.
+  }
+}
+
+// Initial attach: query the current active tab and attach once the
+// sidepanel is ready. This is what makes network capture start "just
+// because the sidepanel is open" — no Start Capture button yet.
+(async () => {
+  try {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      lastFocusedWindow: true,
+    });
+    if (tab && tab.id != null) ensureNetworkCapture(tab.id);
+  } catch (_) {}
+})();
+
+// ══════════════════════════════════════════════════════════════
+// ACTIVITY TIMELINE — grouped co-pilot transcript. Events flow in
+// as a flat list from background, but display as a tree:
+//   Dossier (current tab)
+//   └── Chip strip (every tab touched)
+//       └── Tab-visit sections (collapsible, one per page-visit)
+//           └── Action rows (collapsible if they have consequences)
+//               └── Consequence rows (indented, dim)
+// The envelope's tabId + parentActionId + kind + actor are the only
+// inputs needed for the hierarchy — no extra data plumbing required.
+// ══════════════════════════════════════════════════════════════
+
+const TIMELINE_MAX_EVENTS = 400;
+const timelineEvents = [];
+// Agent-navigate re-tagging now lives in background.js (chrome.storage.session
+// keyed by tabId), so attribution survives sidepanel close + brief SW idles.
+
+// --- helpers ---------------------------------------------------
+
+function nowTimeStr(ts) {
+  const d = ts ? new Date(ts) : new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function shortUrl(url) {
+  if (!url) return "";
+  try {
+    const u = new URL(url);
+    const path = u.pathname.length > 26 ? u.pathname.slice(0, 23) + "…" : u.pathname;
+    return `${u.host}${path === "/" ? "" : path}`;
+  } catch (_) {
+    return String(url).slice(0, 60);
+  }
+}
+
+function hostOf(url) {
+  try { return new URL(url).host; } catch (_) { return ""; }
+}
+
+/** Human label for an element descriptor captured by capture.js. */
+function describeTarget(t) {
+  if (!t) return "";
+  // Prefer the standards-based visible label (aria-labelledby / <label>)
+  // over innerText or placeholder — matches what the user actually saw.
+  const raw =
+    t.label ||
+    t.ariaLabel ||
+    t.text ||
+    t.placeholder ||
+    t.name ||
+    t.id ||
+    t.role ||
+    "";
+  const base = raw
+    ? (raw.length > 60 ? raw.slice(0, 57) + "…" : raw)
+    : t.tag
+      ? `<${t.tag}>`
+      : "";
+  // Append container context ONLY for high-signal containers (dialog and
+  // table-row). Form/section context stays in the envelope for the LLM
+  // but isn't shown inline, to keep the timeline compact.
+  if (t.container === "dialog" && t.containerName) {
+    return `${base} in dialog "${t.containerName}"`;
+  }
+  if (t.container === "table-row" && t.containerName) {
+    return `${base} in row "${t.containerName}"`;
+  }
+  return base;
+}
+
+/** Build the inner HTML for an event's primary line. */
+function eventInnerHtml(ev) {
+  const v = (str, max = 80) => {
+    const s = String(str || "");
+    const cut = s.length > max ? s.slice(0, max - 1) + "…" : s;
+    return `<span class="val">${escapeHtml(cut)}</span>`;
+  };
+  const tag = (str) => `<span class="tag">${escapeHtml(str)}</span>`;
+  const p = ev.payload || {};
+  const ctxUrl = ev.context?.url;
+
+  switch (ev.kind) {
+    case "click": {
+      const desc = describeTarget(ev.target);
+      if (desc) return `Clicked ${v(desc, 60)}`;
+      return `Clicked at ${tag(`(${p.coords?.x ?? 0}, ${p.coords?.y ?? 0})`)}`;
+    }
+    case "input": {
+      const field = describeTarget(ev.target) || "a field";
+      if (p.sensitive) return `Entered a secret into ${v(field, 40)}`;
+      return `Typed ${v(p.value || "", 50)} into ${v(field, 40)}`;
+    }
+    case "submit":
+      return `Submitted ${v(describeTarget(ev.target) || "the form", 50)}`;
+    case "key":
+      return `Pressed ${v(p.key, 20)}`;
+    case "scroll":
+      return `Scrolled`;
+    case "navigate": {
+      const navType = p.navigationType;
+      const verb =
+        navType === "history" ? "Route changed to"
+        : navType === "fragment" ? "Jumped to"
+        : "Navigated to";
+      return `${verb} ${v(shortUrl(ctxUrl), 60)}`;
+    }
+    case "page_ready":
+      return `Opened ${v(shortUrl(ctxUrl), 60)}`;
+    case "form_invalid": {
+      const field = describeTarget(ev.target) || "a field";
+      if (p.validationMessage) {
+        return `${v(field, 30)} rejected: ${v(p.validationMessage, 80)}`;
+      }
+      return `${v(field, 40)} failed validation`;
+    }
+    case "page_alert":
+      return `Alert: ${v(p.text, 120)}`;
+    case "page_dialog_opened":
+      return p.name
+        ? `Dialog opened: ${v(p.name, 50)}`
+        : `Dialog opened`;
+    case "page_title_changed":
+      return `Title changed to ${v(p.title, 60)}`;
+    case "tab_activated":
+      return ctxUrl ? `On ${v(shortUrl(ctxUrl), 60)}` : `Switched tab`;
+    case "network": {
+      const method = p.method || "GET";
+      const status = p.failed ? "\u2715" : (p.status ?? "?");
+      const urlShort = shortUrl(p.url || "");
+      const dur = p.durationMs != null ? ` ${tag(p.durationMs + "ms")}` : "";
+      return `${tag(method)} ${v(urlShort, 50)} ${tag(String(status))}${dur}`;
+    }
+    case "agent_action": {
+      const a = p.action || {};
+      const bits = [`${escapeHtml(a.type || "action")}`];
+      if (a.ref !== undefined) bits.push(tag(`ref ${a.ref}`));
+      if (a.text) bits.push(v(a.text, 50));
+      if (a.url) bits.push(v(shortUrl(a.url), 60));
+      if (a.query) bits.push(v(a.query, 50));
+      if (a.key) bits.push(tag(a.key));
+      return bits.join(" ");
+    }
+    case "agent_thought":
+      return escapeHtml(p.text || "");
+    case "agent_done":
+      return escapeHtml(p.summary ? `${p.summary}` : "Task complete.");
+    case "system":
+      return escapeHtml(p.text || "System note");
+    default:
+      return escapeHtml(ev.kind || "event");
+  }
+}
+
+// Hoisted so they're not reconstructed per event.
+const IMPORTANT_KINDS = new Set([
+  "click", "submit", "navigate", "agent_done",
+  "page_alert", "page_dialog_opened", "tab_activated",
+]);
+const QUIET_KINDS = new Set([
+  "scroll", "page_ready", "key", "page_title_changed",
+]);
+
+/** Visual-class augment for network events: failures bubble up as important. */
+function networkVisualParts(ev) {
+  const p = ev.payload || {};
+  const failed = p.failed || (typeof p.status === "number" && p.status >= 400);
+  return failed ? ["important"] : ["quiet"];
+}
+
+/** Classify event importance for visual weighting. */
+function eventVisualClass(ev) {
+  const parts = [ev.actor || "system"];
+  if (ev.kind === "agent_thought") parts.push("thought");
+  else if (ev.kind === "agent_done") parts.push("done", "important");
+  else if (ev.kind === "agent_action") parts.push("important");
+  else if (ev.kind === "form_invalid") parts.push("important", "error");
+  else if (ev.kind === "network") parts.push(...networkVisualParts(ev));
+  else if (IMPORTANT_KINDS.has(ev.kind)) parts.push("important");
+  else if (QUIET_KINDS.has(ev.kind)) parts.push("quiet");
+  return parts.join(" ");
+}
+
+// ══════════════════════════════════════════════════════════════
+// Hierarchy: Events → Page-visits → Action-groups (action + its
+// consequences). Consequences inherit their parent action's visit,
+// so a click + its Turbo navigate always stay in the same block.
+// A page-visit's boundary is (tabId, url-without-fragment) and is
+// only opened by actions or tab_activated — never by consequence
+// events alone. This keeps visits stable across SPA noise.
+// ══════════════════════════════════════════════════════════════
+
+const ACTION_KINDS_CLIENT = new Set([
+  "click", "input", "submit", "key", "navigate", "agent_action",
+]);
+
+// Which action is currently "in-flight" for the agent — used to
+// apply a pulse to that row. Cleared on agent_done / setRunning(false).
+let runningActionId = null;
+
+// Drill-down view state. Clicks navigate (push); back button returns.
+// currentView ∈ { "root", "visit", "action" }
+let currentView    = "root";
+let currentVisitKey  = null;  // when view === "visit" or "action"
+let currentActionId  = null;  // when view === "action"
+let chipFilter       = null;  // host string, or null for "All"
+
+// Scroll-aware "new events below" counter, for the jump-to-latest pill.
+let pendingBelow = 0;
+
+/**
+ * Host-only key for page-visit grouping. Keeping it at the host level
+ * means all activity on fonts.google.com — no matter which sub-path —
+ * folds into one block. Switching to mail.google.com starts a new block.
+ * Switching tabs also starts a new block (tabId changes).
+ */
+function pageUrlKey(url) {
+  if (!url) return "unknown";
+  try {
+    const u = new URL(url);
+    return u.host || "unknown";
+  } catch (_) { return String(url); }
+}
+
+/** Short, pretty host for chip + header (no path). */
+function hostShort(url) {
+  try {
+    const u = new URL(url);
+    return u.host;
+  } catch (_) { return ""; }
+}
+
+function durationStr(startTs, endTs) {
+  const ms = Math.max(0, endTs - startTs);
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+/**
+ * Build page-visits from the flat event list. A new visit begins when
+ * an action or tab_activated event lands on a different (tabId, url)
+ * than the current visit. Consequence events inherit their parent
+ * action's visit so a click + its navigate + its page_ready stay
+ * grouped, even if the URL changed along the way.
+ */
+function buildPageVisits(events) {
+  const visits = [];
+  let current = null;
+
+  const byId = new Map();
+  for (const ev of events) if (ev.id) byId.set(ev.id, ev);
+  const eventToVisit = new Map();
+
+  for (const ev of events) {
+    const isAction = ACTION_KINDS_CLIENT.has(ev.kind);
+    const isTabActivated = ev.kind === "tab_activated";
+    let visit = null;
+
+    // Consequences inherit their parent's visit — action + its navigate
+    // stay together, no matter what URL the navigate took the tab to.
+    if (ev.parentActionId && byId.has(ev.parentActionId)) {
+      visit = eventToVisit.get(ev.parentActionId) || null;
+    }
+
+    if (!visit) {
+      const tabId = ev.tabId ?? null;
+      const urlKey = pageUrlKey(ev.context?.url);
+
+      const differentPage = !current
+        || current.tabId !== tabId
+        || current.urlKey !== urlKey;
+
+      const shouldOpenNew =
+        !current ||
+        ((isAction || isTabActivated) && differentPage);
+
+      if (shouldOpenNew) {
+        current = {
+          key: `v${visits.length}`,
+          tabId,
+          urlKey,
+          url: ev.context?.url || null,
+          title: ev.context?.title || null,
+          favIconUrl: ev.payload?.favIconUrl || null,
+          startTs: ev.ts,
+          endTs: ev.ts,
+          events: [],
+        };
+        visits.push(current);
+      }
+      visit = current;
+    }
+
+    visit.endTs = ev.ts;
+    visit.events.push(ev);
+    if (ev.id) eventToVisit.set(ev.id, visit);
+
+    if (ev.context?.title) visit.title = ev.context.title;
+    if (ev.payload?.favIconUrl) visit.favIconUrl = ev.payload.favIconUrl;
+    if (ev.context?.url) visit.url = ev.context.url;
+  }
+
+  for (const v of visits) {
+    v.actionGroups = buildActionGroups(v.events);
+  }
+  return visits;
+}
+
+/**
+ * Within a page-visit, fold each action and its consequences into a
+ * group. Orphans (consequence events with no attributable parent) go
+ * in a separate bucket surfaced above the action groups.
+ */
+function buildActionGroups(events) {
+  const groups = [];
+  const orphans = [];
+  const byActionId = new Map();
+
+  for (const ev of events) {
+    // tab_activated is implicit in the visit header — don't render it
+    // as its own row inside the body.
+    if (ev.kind === "tab_activated") continue;
+
+    if (ACTION_KINDS_CLIENT.has(ev.kind)) {
+      const g = { action: ev, consequences: [] };
+      byActionId.set(ev.id, g);
+      groups.push(g);
+    } else if (ev.parentActionId && byActionId.has(ev.parentActionId)) {
+      byActionId.get(ev.parentActionId).consequences.push(ev);
+    } else {
+      orphans.push(ev);
+    }
+  }
+  return { groups, orphans };
+}
+
+// ══════════════════════════════════════════════════════════════
+// DOM builders
+// ══════════════════════════════════════════════════════════════
+
+function buildChevron() {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("viewBox", "0 0 16 16");
+  s.setAttribute("class", "chevron");
+  s.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  p.setAttribute("d", "M6 4l4 4-4 4");
+  p.setAttribute("fill", "none");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "1.8");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  s.appendChild(p);
+  return s;
+}
+
+function buildEventRow(ev, { isConsequence = false } = {}) {
+  const row = document.createElement("div");
+  row.className = "event " + eventVisualClass(ev) + (isConsequence ? " consequence" : "");
+  row.dataset.timestamp = String(ev.ts);
+  if (ev.id) row.dataset.eventId = ev.id;
+  if (ev.parentActionId) row.dataset.parentActionId = ev.parentActionId;
+
+  const time = document.createElement("div");
+  time.className = "event-time";
+  time.textContent = isConsequence ? "" : nowTimeStr(ev.ts);
+
+  const rail = document.createElement("div");
+  rail.className = "event-rail";
+  const marker = document.createElement("span");
+  marker.className = "event-marker";
+  rail.appendChild(marker);
+
+  const content = document.createElement("div");
+  content.className = "event-content";
+  const text = document.createElement("div");
+  text.className = "event-text";
+  text.innerHTML = eventInnerHtml(ev);
+  content.appendChild(text);
+
+  // Sub-line: URL for user events (when not obvious), or redaction flag
+  const sensitive = ev.payload?.sensitive;
+  const evUrl = ev.context?.url;
+  const subBits = [];
+  if (!isConsequence && evUrl && ev.kind !== "navigate" && ev.kind !== "page_ready" && ev.actor === "user") {
+    subBits.push(shortUrl(evUrl));
+  }
+  if (sensitive) subBits.push("REDACTED");
+  if (subBits.length > 0) {
+    const sub = document.createElement("div");
+    sub.className = "event-meta" + (sensitive ? " sensitive" : "");
+    sub.textContent = subBits.join(" · ");
+    content.appendChild(sub);
+  }
+
+  row.appendChild(time);
+  row.appendChild(rail);
+  row.appendChild(content);
+  return row;
+}
+
+/** Visit card for the root view — clickable, drills into visit detail. */
+function buildVisitCard(visit, { isCurrent = false } = {}) {
+  const card = document.createElement("button");
+  card.type = "button";
+  card.className = "visit-card";
+  if (isCurrent) card.classList.add("active");
+  card.dataset.visitKey = visit.key;
+
+  const chev = buildChevron();
+  chev.classList.add("chevron");
+  card.appendChild(chev);
+
+  if (visit.favIconUrl) {
+    const fav = document.createElement("img");
+    fav.className = "visit-favicon";
+    fav.src = visit.favIconUrl;
+    fav.alt = "";
+    fav.addEventListener("error", () => {
+      fav.style.visibility = "hidden";
+    });
+    card.appendChild(fav);
+  }
+
+  const host = document.createElement("span");
+  host.className = "visit-host";
+  host.textContent = hostShort(visit.url) || "unknown";
+  card.appendChild(host);
+
+  const meta = document.createElement("span");
+  meta.className = "visit-meta";
+  const count = visit.actionGroups.groups.length;
+  meta.textContent = `${count} act${count === 1 ? "" : "s"} · ${durationStr(visit.startTs, visit.endTs)}`;
+  card.appendChild(meta);
+
+  card.addEventListener("click", () => pushVisitView(visit.key));
+  return card;
+}
+
+/** Action card for the visit detail view — clickable if consequences exist. */
+function buildActionCard(group) {
+  const hasConsequences = group.consequences.length > 0;
+  const hasAlert = group.consequences.some(
+    (c) => c.kind === "page_alert" || c.kind === "form_invalid"
+  );
+
+  const card = document.createElement(hasConsequences ? "button" : "div");
+  if (hasConsequences) card.type = "button";
+  card.className = "action-card " + eventVisualClass(group.action);
+  if (hasAlert) card.classList.add("has-alert");
+  if (hasConsequences) card.classList.add("clickable");
+  else card.classList.add("no-detail");
+  card.dataset.eventId = group.action.id;
+
+  // Running action gets pulse (reuse .event.in-progress animation)
+  if (runningActionId && group.action.id === runningActionId) {
+    card.classList.add("in-progress");
+  }
+
+  // Column 1: time
+  const time = document.createElement("div");
+  time.className = "event-time";
+  time.textContent = nowTimeStr(group.action.ts);
+  card.appendChild(time);
+
+  // Column 2: rail/marker
+  const rail = document.createElement("div");
+  rail.className = "event-rail";
+  const marker = document.createElement("span");
+  marker.className = "event-marker";
+  rail.appendChild(marker);
+  card.appendChild(rail);
+
+  // Column 3: content (text + sub-meta)
+  const content = document.createElement("div");
+  content.className = "event-content";
+  const text = document.createElement("div");
+  text.className = "event-text";
+  text.innerHTML = eventInnerHtml(group.action);
+  content.appendChild(text);
+
+  const sensitive = group.action.payload?.sensitive;
+  const evUrl = group.action.context?.url;
+  const subBits = [];
+  if (evUrl && group.action.kind !== "navigate" && group.action.kind !== "page_ready" && group.action.actor === "user") {
+    subBits.push(shortUrl(evUrl));
+  }
+  if (sensitive) subBits.push("REDACTED");
+  if (subBits.length > 0) {
+    const sub = document.createElement("div");
+    sub.className = "event-meta" + (sensitive ? " sensitive" : "");
+    sub.textContent = subBits.join(" · ");
+    content.appendChild(sub);
+  }
+  card.appendChild(content);
+
+  // Column 4: chevron + count badge (only when there are consequences)
+  if (hasConsequences) {
+    const controls = document.createElement("div");
+    controls.className = "event-controls";
+    const c = buildChevron();
+    c.classList.add("event-chevron");
+    controls.appendChild(c);
+    const badge = document.createElement("span");
+    badge.className = "consequences-badge";
+    badge.textContent = `${group.consequences.length}`;
+    controls.appendChild(badge);
+    card.appendChild(controls);
+
+    card.addEventListener("click", (e) => {
+      if (e && e.target && e.target.closest && e.target.closest(".val")) return;
+      pushActionView(group.action.id);
+    });
+  }
+
+  return card;
+}
+
+// ══════════════════════════════════════════════════════════════
+// Chip strip — "All" + one chip per host touched. Clicking a chip
+// filters the root view; clicking "All" (or the active chip again)
+// clears the filter. In detail views, clicking a chip pops back to
+// root with that filter applied.
+// ══════════════════════════════════════════════════════════════
+
+function renderChipStrip(visits) {
+  if (!chipStrip) return;
+  chipStrip.innerHTML = "";
+  if (visits.length === 0) return;
+
+  // Unique hosts in visit order (deduped, latest wins for favicon)
+  const hostOrder = [];
+  const hostMeta = new Map(); // host -> { favIconUrl }
+  for (const v of visits) {
+    const h = hostShort(v.url);
+    if (!h) continue;
+    if (!hostMeta.has(h)) hostOrder.push(h);
+    hostMeta.set(h, { favIconUrl: v.favIconUrl || hostMeta.get(h)?.favIconUrl });
+  }
+  if (hostOrder.length <= 1 && chipFilter == null) return; // don't clutter when only one host
+
+  // "All" chip
+  const allChip = document.createElement("button");
+  allChip.type = "button";
+  allChip.className = "tab-chip all-chip";
+  if (chipFilter == null) allChip.classList.add("active");
+  const allLabel = document.createElement("span");
+  allLabel.className = "chip-host";
+  allLabel.textContent = "All";
+  allChip.appendChild(allLabel);
+  allChip.addEventListener("click", () => {
+    chipFilter = null;
+    currentView = "root";
+    currentVisitKey = null;
+    currentActionId = null;
+    renderTimeline();
+  });
+  chipStrip.appendChild(allChip);
+
+  // Per-host chips
+  for (const h of hostOrder) {
+    const meta = hostMeta.get(h) || {};
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "tab-chip";
+    if (chipFilter === h) chip.classList.add("active");
+
+    if (meta.favIconUrl) {
+      const ico = document.createElement("img");
+      ico.className = "chip-favicon";
+      ico.src = meta.favIconUrl;
+      ico.alt = "";
+      ico.addEventListener("error", () => (ico.style.display = "none"));
+      chip.appendChild(ico);
+    }
+    const label = document.createElement("span");
+    label.className = "chip-host";
+    label.textContent = h;
+    chip.appendChild(label);
+
+    chip.addEventListener("click", () => {
+      // Toggle: click active chip → clear filter; else set it.
+      chipFilter = chipFilter === h ? null : h;
+      // Always jump back to root when a chip is clicked
+      currentView = "root";
+      currentVisitKey = null;
+      currentActionId = null;
+      renderTimeline();
+    });
+    chipStrip.appendChild(chip);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Dossier — "Pixel is looking at…" pinned header
+// ══════════════════════════════════════════════════════════════
+
+function updateDossier(currentVisit) {
+  if (!dossier) return;
+  if (!currentVisit || !currentVisit.url) {
+    dossier.classList.add("empty");
+    return;
+  }
+  dossier.classList.remove("empty");
+  if (dossierFavicon) {
+    if (currentVisit.favIconUrl) {
+      dossierFavicon.src = currentVisit.favIconUrl;
+      dossierFavicon.style.visibility = "visible";
+    } else {
+      dossierFavicon.removeAttribute("src");
+      dossierFavicon.style.visibility = "hidden";
+    }
+  }
+  if (dossierHost) dossierHost.textContent = shortUrl(currentVisit.url) || "";
+  if (dossierTitle) dossierTitle.textContent = currentVisit.title || "";
+}
+
+// ══════════════════════════════════════════════════════════════
+// Jump-to-latest pill — appears when new events land while the
+// user is scrolled up. Doesn't steal scroll.
+// ══════════════════════════════════════════════════════════════
+
+function isNearBottom() {
+  if (!stream) return true;
+  return stream.scrollHeight - stream.scrollTop - stream.clientHeight < 120;
+}
+function scrollToBottom() {
+  if (!stream) return;
+  stream.scrollTop = stream.scrollHeight;
+}
+function refreshJumpPill() {
+  if (!jumpToLatest || !jumpToLatestCount) return;
+  if (pendingBelow <= 0) {
+    jumpToLatest.classList.add("hidden");
+    return;
+  }
+  jumpToLatestCount.textContent = String(pendingBelow);
+  jumpToLatest.classList.remove("hidden");
+}
+if (jumpToLatest) {
+  jumpToLatest.addEventListener("click", () => {
+    pendingBelow = 0;
+    refreshJumpPill();
+    scrollToBottom();
+  });
+}
+if (stream) {
+  stream.addEventListener("scroll", () => {
+    if (isNearBottom()) {
+      pendingBelow = 0;
+      refreshJumpPill();
+    }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+// Click-to-copy on URL chips (the orange `.val` spans)
+// ══════════════════════════════════════════════════════════════
+
+if (timelineBody) {
+  timelineBody.addEventListener("click", (e) => {
+    const chip = e.target.closest && e.target.closest(".val");
+    if (!chip) return;
+    const text = chip.textContent || "";
+    if (!text) return;
+    e.stopPropagation(); // don't toggle the parent action
+    try {
+      navigator.clipboard.writeText(text).then(
+        () => {
+          if (typeof showToast === "function") {
+            showToast(`Copied "${text.length > 40 ? text.slice(0, 37) + "…" : text}"`, {
+              tone: "info",
+              duration: 1600,
+            });
+          }
+        },
+        () => {}
+      );
+    } catch (_) {}
+  });
+}
+
+// ══════════════════════════════════════════════════════════════
+// Drill-down navigation
+// ══════════════════════════════════════════════════════════════
+
+function pushVisitView(visitKey) {
+  currentView = "visit";
+  currentVisitKey = visitKey;
+  currentActionId = null;
+  renderTimeline();
+  if (stream) stream.scrollTop = 0;
+}
+
+function pushActionView(actionId) {
+  currentView = "action";
+  currentActionId = actionId;
+  renderTimeline();
+  if (stream) stream.scrollTop = 0;
+}
+
+function popView() {
+  if (currentView === "action") {
+    currentView = "visit";
+    currentActionId = null;
+  } else if (currentView === "visit") {
+    currentView = "root";
+    currentVisitKey = null;
+  }
+  renderTimeline();
+}
+
+if (backBtn) backBtn.addEventListener("click", popView);
+
+function findActionGroup(visits, actionId) {
+  for (const v of visits) {
+    for (const g of v.actionGroups.groups) {
+      if (g.action.id === actionId) return { visit: v, group: g };
+    }
+  }
+  return null;
+}
+
+function setNavHeader(title, show) {
+  if (!navHeader || !navTitle) return;
+  if (show) {
+    navTitle.textContent = title || "";
+    navHeader.classList.remove("hidden");
+  } else {
+    navHeader.classList.add("hidden");
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// View renderers
+// ══════════════════════════════════════════════════════════════
+
+function renderRootView(body, visits) {
+  setNavHeader("", false);
+
+  const filtered = chipFilter
+    ? visits.filter((v) => hostShort(v.url) === chipFilter)
+    : visits;
+
+  if (filtered.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "visit-empty";
+    empty.textContent = chipFilter
+      ? `Nothing captured on ${chipFilter} yet.`
+      : "Nothing captured yet.";
+    body.appendChild(empty);
+    return;
+  }
+
+  // Current visit = last visit overall; mark it active for the ember accent.
+  const currentVisit = visits[visits.length - 1];
+  for (const v of filtered) {
+    body.appendChild(buildVisitCard(v, { isCurrent: v === currentVisit }));
+  }
+}
+
+function renderVisitDetail(body, visit) {
+  const title = hostShort(visit.url) || "unknown";
+  setNavHeader(title, true);
+
+  const groups = visit.actionGroups.groups;
+  const orphans = visit.actionGroups.orphans;
+
+  // Orphan "page activity" (alerts, title changes, dialogs not tied to an action)
+  // appears at the top of the visit detail.
+  for (const o of orphans) {
+    // Render orphans as leaf-style action cards (no consequences).
+    const pseudo = { action: o, consequences: [] };
+    body.appendChild(buildActionCard(pseudo));
+  }
+
+  if (groups.length === 0 && orphans.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "visit-empty";
+    empty.textContent = "No activity yet on this page.";
+    body.appendChild(empty);
+    return;
+  }
+
+  for (const g of groups) {
+    body.appendChild(buildActionCard(g));
+  }
+}
+
+function renderActionDetail(body, visit, group) {
+  // Use a short summary of the action as the nav title (plain-text,
+  // stripping any HTML tags from eventInnerHtml).
+  const tmp = document.createElement("div");
+  tmp.innerHTML = eventInnerHtml(group.action);
+  const title = (tmp.textContent || "").slice(0, 80);
+  setNavHeader(title, true);
+
+  // Action row itself (as a non-clickable card)
+  const actionPseudo = { action: group.action, consequences: [] };
+  const actionCard = buildActionCard(actionPseudo);
+  actionCard.classList.add("no-detail");
+  body.appendChild(actionCard);
+
+  // Consequences as leaf rows below
+  if (group.consequences.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "visit-empty";
+    empty.textContent = "No consequences recorded for this action.";
+    body.appendChild(empty);
+    return;
+  }
+  for (const c of group.consequences) {
+    body.appendChild(buildEventRow(c, { isConsequence: true }));
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// Render entry point — routes to the right view
+// ══════════════════════════════════════════════════════════════
+
+function renderTimeline() {
+  if (!timelineBody) return;
+
+  const wasNearBottom = isNearBottom();
+  timelineBody.innerHTML = "";
+
+  const visits = buildPageVisits(timelineEvents);
+  if (streamIdle) {
+    streamIdle.classList.toggle("hidden", visits.length > 0);
+  }
+
+  // Route to view. If a stale ref points to something no longer present,
+  // fall back to root gracefully.
+  let viewResolved = currentView;
+  if (viewResolved === "action") {
+    const found = findActionGroup(visits, currentActionId);
+    if (found) {
+      renderActionDetail(timelineBody, found.visit, found.group);
+    } else {
+      viewResolved = "root";
+      currentView = "root";
+      currentActionId = null;
+      currentVisitKey = null;
+      renderRootView(timelineBody, visits);
+    }
+  } else if (viewResolved === "visit") {
+    const visit = visits.find((v) => v.key === currentVisitKey);
+    if (visit) {
+      renderVisitDetail(timelineBody, visit);
+    } else {
+      viewResolved = "root";
+      currentView = "root";
+      currentVisitKey = null;
+      renderRootView(timelineBody, visits);
+    }
+  } else {
+    renderRootView(timelineBody, visits);
+  }
+
+  renderChipStrip(visits);
+  updateDossier(visits.length ? visits[visits.length - 1] : null);
+
+  if (wasNearBottom) scrollToBottom();
+}
+
+function appendTimelineEvent(ev) {
+  // Background is the source of truth for id/sessionId/ts/actor/parentActionId.
+  // We just defensively coerce in case a malformed event slips through.
+  if (ev.ts == null) ev.ts = Date.now();
+  if (!ev.actor) ev.actor = "system";
+
+  const wasNearBottom = isNearBottom();
+
+  timelineEvents.push(ev);
+  if (timelineEvents.length > TIMELINE_MAX_EVENTS) {
+    timelineEvents.splice(0, timelineEvents.length - TIMELINE_MAX_EVENTS);
+  }
+
+  // Update the running-action tracker.
+  if (ev.kind === "agent_action") {
+    runningActionId = ev.id;
+  } else if (ev.kind === "agent_done") {
+    runningActionId = null;
+  }
+
+  renderTimeline();
+
+  // Jump-to-latest counter: if user was scrolled up, count new arrivals.
+  if (!wasNearBottom) {
+    pendingBelow += 1;
+    refreshJumpPill();
+  }
+
+  refreshStateIndicator(ev);
+}
+
+function clearTimeline() {
+  timelineEvents.length = 0;
+  pendingBelow = 0;
+  runningActionId = null;
+  // Reset navigation state too — "new chat" returns you to the root view
+  // with no filter, regardless of where you had drilled into.
+  currentView = "root";
+  currentVisitKey = null;
+  currentActionId = null;
+  chipFilter = null;
+  refreshJumpPill();
+  renderTimeline();
+  resetStateIndicator();
+  // Tell background to regenerate sessionIds across all known tabs so the
+  // next batch of events arrives under a fresh session.
+  try {
+    chrome.runtime
+      .sendMessage({ type: "pixelfoxx_session_reset" })
+      .catch(() => {});
+  } catch (_) {}
+}
+
+// --- incoming events from background (content captures + webNav) --------
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (!message || message.type !== "pixelfoxx_event") return;
+  const ev = message.event;
+  if (!ev || !ev.kind) return;
+  // Re-attach CDP network capture when the user switches tabs.
+  // attachDebugger is idempotent, so same-tab tab_activated is a no-op.
+  if (ev.kind === "tab_activated" && ev.tabId != null) {
+    ensureNetworkCapture(ev.tabId);
+  }
+  appendTimelineEvent(ev);
+});
+
+/**
+ * Agent event mirror. Called by the agent loop.
+ *
+ * Renders synchronously (no IPC round-trip → no flicker, no reorder risk
+ * vs incoming user events). Notifies background as a state-update so it
+ * can open the action window for outcome attribution and mark agent
+ * navigates for re-tagging in the webNavigation handler.
+ */
+function appendAgentTimelineEvent(kind, data) {
+  const tabId = (typeof getActiveAgentTabId === "function")
+    ? getActiveAgentTabId()
+    : null;
+  const ev = {
+    id: crypto.randomUUID(),
+    sessionId: null, // sidepanel doesn't track sessionIds; background owns them
+    ts: Date.now(),
+    source: "agent",
+    kind,
+    actor: "agent",
+    tabId,
+    payload: data || {},
+    parentActionId: null,
+    causedBy: "agent-action",
+  };
+
+  // Render immediately so the user sees agent thoughts/actions without lag.
+  appendTimelineEvent(ev);
+
+  // Notify background so it can update tabState (action window + agent-nav mark).
+  try {
+    chrome.runtime
+      .sendMessage({ type: "pixelfoxx_emit", event: ev })
+      .catch(() => {});
+  } catch (_) {}
+}
+window.appendAgentTimelineEvent = appendAgentTimelineEvent;
+
+// ══════════════════════════════════════════════════════════════
+// STATE INDICATOR — who's driving right now
+// ══════════════════════════════════════════════════════════════
+
+let stateIdleTimer = null;
+
+function setState({ actor, verb, mode }) {
+  if (!stateIndicator || !stateActorEl || !stateVerbEl) return;
+  if (actor) stateActorEl.textContent = actor;
+  if (verb) stateVerbEl.textContent = verb;
+  stateIndicator.classList.remove("idle", "active-user", "active-agent");
+  if (mode) stateIndicator.classList.add(mode);
+}
+
+function resetStateIndicator() {
+  setState({ actor: "Foxx", verb: "is observing", mode: "idle" });
+  if (stateTimingEl) stateTimingEl.textContent = "";
+}
+
+/** React to the most recent event to show who's driving. */
+function refreshStateIndicator(ev) {
+  if (!ev) return;
+  if (running) {
+    setState({ actor: "Foxx", verb: "is driving…", mode: "active-agent" });
+    return;
+  }
+  if (ev.actor === "user") {
+    setState({ actor: "You", verb: "are driving", mode: "active-user" });
+    clearTimeout(stateIdleTimer);
+    stateIdleTimer = setTimeout(() => {
+      if (!running) resetStateIndicator();
+    }, 6000);
+    return;
+  }
+  if (ev.actor === "agent" && ev.kind === "agent_done") {
+    setState({ actor: "Foxx", verb: "finished the task", mode: "idle" });
+    return;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// TOASTS — for errors + system notifications
+// ══════════════════════════════════════════════════════════════
+
+function showToast(message, { tone = "error", duration = 5000 } = {}) {
+  if (!toastTray) return;
+  const toast = document.createElement("div");
+  toast.className = "toast" + (tone === "info" ? " info" : "");
+  toast.textContent = message;
+  toastTray.appendChild(toast);
+  setTimeout(() => {
+    toast.classList.add("fading");
+    setTimeout(() => toast.remove(), 260);
+  }, duration);
+}
+window.showToast = showToast;
+
+// Initialize the state indicator on load.
+resetStateIndicator();
