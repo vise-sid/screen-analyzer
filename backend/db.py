@@ -100,6 +100,7 @@ def init_db() -> None:
                 active_todo_id       TEXT,
                 awaiting_approval    INTEGER NOT NULL DEFAULT 0,
                 gemini_contents_json TEXT NOT NULL DEFAULT '[]',
+                source_playbook_id   TEXT,
                 created_at           TEXT NOT NULL,
                 updated_at           TEXT NOT NULL,
                 FOREIGN KEY (user_sub) REFERENCES users(sub)
@@ -161,6 +162,15 @@ def init_db() -> None:
                 ON playbook_blocks(playbook_id, order_index);
             """
         )
+
+        # Idempotent column adds for existing databases.
+        _add_column_if_missing(_conn, "builder_sessions", "source_playbook_id", "TEXT")
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 @contextmanager
@@ -309,6 +319,7 @@ def create_builder_session(
     active_todo_id: str | None = None,
     awaiting_approval: int = 0,
     gemini_contents_json: str = "[]",
+    source_playbook_id: str | None = None,
 ) -> None:
     now = _now_iso()
     with _cursor() as cur:
@@ -318,8 +329,8 @@ def create_builder_session(
                 id, user_sub, status, intent_spec_json, site_models_json,
                 draft_block_graph_json, evidence_ledger_json, gate_state_json,
                 todo_plan_json, active_todo_id, awaiting_approval,
-                gemini_contents_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                gemini_contents_json, source_playbook_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -334,6 +345,7 @@ def create_builder_session(
                 active_todo_id,
                 awaiting_approval,
                 gemini_contents_json,
+                source_playbook_id,
                 now,
                 now,
             ),

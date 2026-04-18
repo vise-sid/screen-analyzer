@@ -274,12 +274,17 @@ class SessionHarness(BaseModel):
     active_todo_id: str | None = None
     awaiting_approval: bool = False
     gemini_contents: list[dict[str, Any]] = Field(default_factory=list)
+    # Set when the session is a rerun of an existing playbook. Determines
+    # which model drives the agent loop: None → Pro (discovery/build),
+    # non-None → Flash (execute a known plan).
+    source_playbook_id: str | None = None
     created_at: str
     updated_at: str
 
 
 class BuilderSessionCreateRequest(BaseModel):
     message: str
+    from_playbook_id: str | None = None
 
 
 class BuilderSessionMessageRequest(BaseModel):
@@ -892,6 +897,7 @@ def load_session_harness(record: dict[str, Any]) -> SessionHarness:
         "active_todo_id": record.get("active_todo_id"),
         "awaiting_approval": bool(record.get("awaiting_approval") or 0),
         "gemini_contents": json.loads(gemini_contents_raw) if gemini_contents_raw else [],
+        "source_playbook_id": record.get("source_playbook_id"),
         "created_at": record["created_at"],
         "updated_at": record["updated_at"],
     }
@@ -911,6 +917,7 @@ def serialize_session_harness(session: SessionHarness) -> dict[str, Any]:
         "active_todo_id": session.active_todo_id,
         "awaiting_approval": 1 if session.awaiting_approval else 0,
         "gemini_contents_json": json.dumps(session.gemini_contents, separators=(",", ":")),
+        "source_playbook_id": session.source_playbook_id,
     }
 
 

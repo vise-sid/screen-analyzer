@@ -57,6 +57,7 @@ from harness import (
 CURRENT_ADVISOR_CALLBACK = None  # type: ignore[assignment]
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 5-layer system prompt
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,7 +162,7 @@ CONVERSATION & PLAN (server-side, no browser action — respond instantly)
   set_todo_plan(todos=[{id,title,description?}])     — declare the plan. Agent-authored, user cannot edit. Use once up front; replace with replan when scope changes.
   request_approval(todo_id, preview?)                — pause before starting a todo. Client shows Approve / Modify / Stop buttons.
   update_todo(todo_id, status, note?)                — mark status transitions: pending→approved→running→done/failed/skipped.
-  mark_todo_done(todo_id, summary, evidence_block_ids?) — finalize a todo. Always follow with request_approval for the next one, OR save_playbook if last.
+  mark_todo_done(todo_id, summary, evidence_block_ids?) — finalize a todo. ONLY after `verify` passes. Always follow with request_approval for the next one, OR save_playbook if last.
   save_playbook(title?)                              — when all todos are done, propose saving. User confirms in the UI.
   ask_advisor(question, context?)                    — consult the smarter model. Use when stuck, on canvas apps, on novel sites, or after 2 failed actions.
   store(key, note?)                                  — save the last scrape/extract result to session memory for later recall.
@@ -214,7 +215,7 @@ WORKSPACE WRITE (use APIs, never canvas)
 THINKING AIDS
   ask_advisor(question, context?)    store(key)    recall(key)    wait(ms)
 
-9 hard tool-selection rules:
+10 hard tool-selection rules:
 1. Every new session MUST start with `chat` + `clarify` to greet and scope. No tools fire until there is a todo plan.
 2. Before the first state-changing tool in a todo, emit `request_approval(todo_id)` and STOP. Never run a navigate/click/type without approval.
 3. Observation tools are always free. You can probe/scrape/screenshot without approval.
@@ -222,8 +223,12 @@ THINKING AIDS
 5. Before the FIRST navigation in a new session, run `probe_site` — you need a page model.
 6. After any gate (popup/dialog/captcha/auth), re-run `probe_site` before continuing.
 7. **Think parameterization from the start.** As you clarify, identify which pieces of the task are session-specific knobs (recipient, budget, query terms, output columns, date ranges, etc.) vs. invariant structure. Call them out in `chat` as you spot them so the user knows what's being parameterized. Keep a running mental list — you will commit it via `generalized_inputs` when you call `save_playbook`.
-8. `save_playbook` is only offered after all todos are `done` and no human gates are open. It MUST include a non-empty `generalized_inputs` array — otherwise the saved playbook is a one-shot and useless for reruns.
-9. If two successive actions fail, stop and `ask_advisor` instead of trying a third variant.
+8. **Verify-before-done loop — non-negotiable.** Every todo ends with a verification pass, NOT with the last interaction. After the state-changing action for a todo runs, in the SAME turn or the very next one:
+   - call `screenshot` AND `probe_site` to see what actually happened,
+   - then call `verify(expected)` with a concrete expected signal (URL shape, visible text, a network response, a DOM element that should now exist).
+   If verify passes → `mark_todo_done(todo_id, summary)`. If verify fails → describe what you saw in `chat`, retry the corrective action ONCE (new params or different selector), and re-verify. Two consecutive verify failures on the same todo → `ask_advisor`, and if still stuck, `update_todo(status="failed", note=...)`. Never call `mark_todo_done` on a todo whose verify did not pass.
+9. `save_playbook` is only offered after all todos are `done` and no human gates are open. It MUST include a non-empty `generalized_inputs` array — otherwise the saved playbook is a one-shot and useless for reruns.
+10. If two successive actions fail, stop and `ask_advisor` instead of trying a third variant.
 </pixel_tool_discipline>"""
 
 
@@ -325,10 +330,10 @@ CONVERSATIONAL_TOOLS = [
     ),
     _fn(
         "mark_todo_done",
-        "Finalize a todo with a short outcome summary. Use this when the verifier has passed. Follow up with request_approval for the next todo, OR save_playbook if last.",
+        "Finalize a todo. ONLY call this after a `verify(...)` has passed in the same or prior turn. The summary must reference what verify observed. If verify failed, retry once and re-verify — do not call mark_todo_done on an unverified todo.",
         _obj(
             todo_id=_str("Todo id."),
-            summary=_str("What actually happened and how Pixel verified it."),
+            summary=_str("What actually happened — must reference what verify observed."),
             evidence_block_ids=_arr(
                 Schema(type=Type.STRING),
                 "Block ids that verify this todo.",
@@ -483,9 +488,9 @@ BROWSER_TOOLS = [
 
     _fn(
         "verify",
-        "Run a success check: URL change, visible text, network response, or download.",
+        "Run a success check: URL change, visible text, network response, or download. MUST be called at the end of every todo before mark_todo_done — it's the pass/fail gate. Pair with `screenshot` + `probe_site` on the same turn so you can see what you're verifying against.",
         _obj(
-            expected=_str("Human description of what success looks like."),
+            expected=_str("Concrete description of what success looks like on the page right now."),
             url_contains=_str("Expected substring in URL.", required=False),
             text_contains=_str("Expected substring of visible text.", required=False),
         ),
@@ -665,7 +670,15 @@ def _dict_to_content(raw: dict[str, Any]) -> Content:
 #   }
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = os.getenv("PIXEL_AGENT_MODEL", "gemini-3-flash-preview")
+# Orchestrator: the high-quality model used during playbook CREATION (discovery,
+# clarify, planning, reasoning on novel sites). Runs when session.source_playbook_id
+# is None.
+ORCHESTRATOR_MODEL = os.getenv("PIXEL_ORCHESTRATOR_MODEL", "gemini-3.1-pro-preview")
+# Replay model: used when re-running a SAVED playbook. The plan is known, the
+# parameters are captured, so most of the work is execution — Flash is enough.
+SUMMARIZER_MODEL = os.getenv("PIXEL_SUMMARIZER_MODEL", "gemini-3-flash-preview")
+# Back-compat alias; prefer ORCHESTRATOR_MODEL in new code.
+DEFAULT_MODEL = ORCHESTRATOR_MODEL
 MAX_TOOL_ITERATIONS = 10
 
 
@@ -673,6 +686,7 @@ def run_agent_step(
     *,
     session: SessionHarness,
     client: genai.Client,
+    model: str | None = None,
     user_message: str | None = None,
     action_results: list[dict[str, Any]] | None = None,
     record_usage=None,  # callable(response, purpose=...) — optional
@@ -735,10 +749,12 @@ def run_agent_step(
     approval_todo_id: str | None = None
     approval_preview: str | None = None
 
+    chosen_model = model or ORCHESTRATOR_MODEL
+
     for _ in range(MAX_TOOL_ITERATIONS):
         system_instruction = build_system_instruction(session, latest_user_message)
         response = client.models.generate_content(
-            model=DEFAULT_MODEL,
+            model=chosen_model,
             contents=contents,
             config=GenerateContentConfig(
                 system_instruction=system_instruction,

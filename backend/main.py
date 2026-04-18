@@ -175,6 +175,7 @@ def _persist_builder_session(
             active_todo_id=payload["active_todo_id"],
             awaiting_approval=payload["awaiting_approval"],
             gemini_contents_json=payload["gemini_contents_json"],
+            source_playbook_id=payload["source_playbook_id"],
         )
         return
 
@@ -345,6 +346,8 @@ def _exec_agent_advisor(session: SessionHarness, question: str, user_sub: str) -
     )
 
 
+
+
 @app.post("/sessions", response_model=BuilderSessionEnvelope)
 async def create_builder_session(
     req: BuilderSessionCreateRequest,
@@ -358,6 +361,7 @@ async def create_builder_session(
 
     intent_spec = build_initial_intent_spec(req.message or "Starting a new session")
     session = new_session_harness(str(uuid.uuid4()), intent_spec)
+    session.source_playbook_id = req.from_playbook_id or None
     pixel_agent.seed_session_for_first_turn(session, req.message)
 
     _persist_builder_session(session, user, create=True)
@@ -418,6 +422,15 @@ async def agent_step(
         for r in req.action_results
     ]
 
+    # Model selection: a session spawned from a saved playbook runs on Flash
+    # (the plan is already known, mostly execution). A fresh discovery session
+    # runs on Pro.
+    model = (
+        pixel_agent.SUMMARIZER_MODEL
+        if session.source_playbook_id
+        else pixel_agent.ORCHESTRATOR_MODEL
+    )
+
     # Provide the advisor callback to the agent for this turn only.
     pixel_agent.CURRENT_ADVISOR_CALLBACK = lambda q: _exec_agent_advisor(session, q, user.sub)  # type: ignore[attr-defined]
 
@@ -425,6 +438,7 @@ async def agent_step(
         result = pixel_agent.run_agent_step(
             session=session,
             client=client,
+            model=model,
             user_message=req.user_message,
             action_results=action_results_payload or None,
             record_usage=_agent_record_usage_factory(user.sub, session_id),

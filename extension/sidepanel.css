@@ -393,50 +393,63 @@ body {
   66% { content: '...'; }
 }
 
-/* ═══ APPROVAL CARD ═══ */
-.approval-card {
-  margin: 0 14px 10px;
-  padding: 12px 14px;
+/* ═══ INLINE APPROVAL BUBBLE ═══ */
+.chat-bubble.approval {
+  align-self: flex-start;
   background: var(--surface);
+  color: var(--text);
   border: 1px solid rgba(254, 202, 87, 0.35);
-  border-radius: 12px;
+  border-left: 3px solid var(--yellow);
+  border-radius: 14px 14px 14px 4px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
-.approval-title {
+.chat-bubble.approval .approval-text {
   font-size: 13px;
-  font-weight: 700;
-  color: var(--yellow);
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
 }
-.approval-sub {
-  font-size: 12px;
-  color: var(--text-sub);
-  line-height: 1.45;
-}
-.approval-actions {
+.chat-bubble.approval .approval-actions {
   display: flex;
   gap: 8px;
 }
-.approval-approve,
-.approval-reject {
+.chat-approve,
+.chat-reject {
   flex: 1;
-  padding: 8px 12px;
+  padding: 7px 12px;
   border: none;
   border-radius: 10px;
   font-family: inherit;
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
+  transition: transform 0.08s ease, background 0.15s ease, color 0.15s ease;
 }
-.approval-approve { background: var(--orange); color: #000; }
-.approval-approve:hover { background: var(--orange-light); }
-.approval-reject {
+.chat-approve { background: var(--orange); color: #000; }
+.chat-approve:hover:not(:disabled) { background: var(--orange-light); transform: translateY(-1px); }
+.chat-reject {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--text-muted);
 }
-.approval-reject:hover { color: var(--red); border-color: var(--red); }
+.chat-reject:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
+.chat-approve:disabled,
+.chat-reject:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+}
+.chat-bubble.approval .approval-resolved {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.chat-bubble.approval .approval-resolved.approved { color: var(--orange-light); }
+.chat-bubble.approval .approval-resolved.rejected { color: var(--red); }
 
 /* ═══ SAVE BANNER ═══ */
 .save-banner {

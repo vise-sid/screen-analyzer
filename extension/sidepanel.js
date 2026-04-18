@@ -32,11 +32,6 @@ const todoStrip = document.getElementById("todoStrip");
 const todoStripList = document.getElementById("todoStripList");
 const todoStripCount = document.getElementById("todoStripCount");
 
-const approvalCard = document.getElementById("approvalCard");
-const approvalSub = document.getElementById("approvalSub");
-const approveBtn = document.getElementById("approveBtn");
-const rejectBtn = document.getElementById("rejectBtn");
-
 const saveBanner = document.getElementById("saveBanner");
 const saveBtn = document.getElementById("saveBtn");
 
@@ -78,7 +73,7 @@ function goHome() {
   renderedMessageIds = new Set();
   chatThread.innerHTML = "";
   setTodoPlan({ todos: [] }, null);
-  hideApproval();
+  pendingApprovalBubble = null;
   hideSaveBanner();
   cleanupTabManager().catch((e) => console.warn("cleanupTabManager", e));
   showLanding();
@@ -197,14 +192,68 @@ function setTodoPlan(plan, activeTodoId) {
 }
 
 // ── Approval flow ───────────────────────────────────────────
-function showApproval(todoId, description) {
-  approvalCard?.classList.remove("hidden");
-  approvalSub.textContent = description || "Next step is ready.";
-  approveBtn.dataset.todoId = todoId || "";
+// An approval is an inline chat bubble carrying Pixel's own preview text
+// plus Go-ahead / Hold-on buttons. No modal, no popup.
+let pendingApprovalBubble = null;
+
+function addApprovalBubble(todoId, previewText) {
+  const bubble = document.createElement("div");
+  bubble.className = "chat-bubble approval";
+  bubble.dataset.todoId = todoId || "";
+
+  const text = document.createElement("div");
+  text.className = "approval-text";
+  text.textContent = previewText || "Ready when you are.";
+  bubble.appendChild(text);
+
+  const actions = document.createElement("div");
+  actions.className = "approval-actions";
+
+  const go = document.createElement("button");
+  go.className = "chat-approve";
+  go.type = "button";
+  go.textContent = "Go ahead";
+
+  const hold = document.createElement("button");
+  hold.className = "chat-reject";
+  hold.type = "button";
+  hold.textContent = "Hold on…";
+
+  go.addEventListener("click", () => {
+    resolveApprovalBubble(bubble, "approved");
+    approveCurrentTodo(todoId).catch((e) =>
+      addBubble("assistant", e.message, { cls: "error" })
+    );
+  });
+  hold.addEventListener("click", () => {
+    resolveApprovalBubble(bubble, "rejected");
+    rejectCurrentTodo().catch((e) =>
+      addBubble("assistant", e.message, { cls: "error" })
+    );
+  });
+
+  actions.appendChild(go);
+  actions.appendChild(hold);
+  bubble.appendChild(actions);
+
+  chatThread.appendChild(bubble);
+  chatThread.scrollTop = chatThread.scrollHeight;
+  pendingApprovalBubble = bubble;
+  return bubble;
 }
 
-function hideApproval() {
-  approvalCard?.classList.add("hidden");
+function resolveApprovalBubble(bubble, outcome) {
+  if (!bubble) return;
+  bubble.querySelectorAll("button").forEach((b) => {
+    b.disabled = true;
+  });
+  const existing = bubble.querySelector(".approval-resolved");
+  if (existing) existing.remove();
+  const label = document.createElement("div");
+  label.className = `approval-resolved ${outcome}`;
+  label.textContent = outcome === "approved" ? "✓ Approved" : "✗ Held";
+  bubble.appendChild(label);
+  if (pendingApprovalBubble === bubble) pendingApprovalBubble = null;
 }
 
 // ── Save banner ─────────────────────────────────────────────
@@ -242,11 +291,13 @@ function setRunning(state) {
 }
 
 // ── Session lifecycle ───────────────────────────────────────
-async function createNewSession(initialMessage) {
+async function createNewSession(initialMessage, { fromPlaybookId = null } = {}) {
+  const body = { message: initialMessage || "" };
+  if (fromPlaybookId) body.from_playbook_id = fromPlaybookId;
   const resp = await apiFetch(`${API_BASE}/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message: initialMessage || "" }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) throw new Error(`create session failed: ${resp.status}`);
   return resp.json();
@@ -272,7 +323,7 @@ async function startSession() {
   if (running) return;
   showChat();
   setTodoPlan({ todos: [] }, null);
-  hideApproval();
+  pendingApprovalBubble = null;
   hideSaveBanner();
   chatThread.innerHTML = "";
   renderedMessageIds = new Set();
@@ -319,9 +370,10 @@ async function sendMessage() {
   }
 
   addBubble("user", text);
+  // Typing a fresh message implicitly resolves any open approval bubble.
+  if (pendingApprovalBubble) resolveApprovalBubble(pendingApprovalBubble, "rejected");
   setRunning(true);
   try {
-    hideApproval();
     await driveAgentStep({ user_message: text, action_results: [] });
   } catch (err) {
     addBubble("assistant", `${err.message}`, { cls: "error" });
@@ -330,19 +382,14 @@ async function sendMessage() {
   }
 }
 
-async function approveCurrentTodo() {
+async function approveCurrentTodo(todoId) {
   if (running) return;
-  const todoId = approveBtn.dataset.todoId || "";
-  hideApproval();
   setRunning(true);
   try {
     const note = todoId
       ? `Approved. Go ahead with todo ${todoId}.`
       : "Approved. Go ahead.";
-    addBubble("user", "Go ahead");
     await driveAgentStep({ user_message: note, action_results: [] });
-  } catch (err) {
-    addBubble("assistant", err.message, { cls: "error" });
   } finally {
     setRunning(false);
   }
@@ -350,16 +397,12 @@ async function approveCurrentTodo() {
 
 async function rejectCurrentTodo() {
   if (running) return;
-  hideApproval();
   setRunning(true);
   try {
-    addBubble("user", "Hold on");
     await driveAgentStep({
       user_message: "Hold on — don't run that yet. Reconsider or ask me.",
       action_results: [],
     });
-  } catch (err) {
-    addBubble("assistant", err.message, { cls: "error" });
   } finally {
     setRunning(false);
   }
@@ -394,8 +437,8 @@ async function driveAgentStep(firstPayload) {
         result.approval_preview ||
         activeTodo?.description ||
         activeTodo?.title ||
-        "Next step is ready.";
-      showApproval(result.approval_todo_id, previewText);
+        "Ready when you are.";
+      addApprovalBubble(result.approval_todo_id, previewText);
       return;
     }
 
@@ -775,17 +818,58 @@ async function loadPlaybooks() {
     card.appendChild(title);
     card.appendChild(meta);
     card.appendChild(grade);
-    card.addEventListener("click", () => openPlaybook(pb));
+    card.addEventListener("click", () =>
+      openPlaybook(pb).catch((e) => addBubble("assistant", e.message, { cls: "error" }))
+    );
     playbooksList.appendChild(card);
   }
 }
 
-function openPlaybook(pb) {
+async function openPlaybook(pb) {
+  if (running) return;
   goHome();
   showChat();
-  addBubble("assistant", `Loaded playbook: ${pb.title}`, { cls: "system" });
-  const md = pb.markdown_render || "";
-  if (md) addBubble("assistant", md);
+
+  const inputs = pb.generalized_inputs || [];
+  const inputLines = inputs
+    .map((i) => {
+      const parts = [`- **${i.name}**`];
+      if (i.description) parts.push(`: ${i.description}`);
+      if (i.default_value) parts.push(` (last run: \`${i.default_value}\`)`);
+      return parts.join("");
+    })
+    .join("\n");
+
+  const plan = (pb.markdown_render || "").trim();
+  const promptLines = [
+    `Let's rerun this saved playbook: **${pb.title}**.`,
+    "",
+    inputs.length
+      ? `Parameters you defined — ask me for the current values before driving anything:\n${inputLines}`
+      : `No generalized inputs are captured on this playbook, so start by asking me for whatever you'd need to rerun this.`,
+  ];
+  if (plan) {
+    promptLines.push("", "Previous plan, for reference:", plan);
+  }
+  const seedMessage = promptLines.join("\n");
+
+  addBubble("user", `Run playbook: "${pb.title}"`);
+  addBubble("assistant", `Loading playbook "${pb.title}" (running on Flash)…`, { cls: "system" });
+  setRunning(true);
+  try {
+    try { await initTabManager(); } catch (e) { console.warn("initTabManager", e); }
+    const envelope = await createNewSession(seedMessage, {
+      fromPlaybookId: pb.playbook_id,
+    });
+    sessionId = envelope.session.session_id;
+    renderMessages(envelope.messages || []);
+    setTodoPlan(envelope.session.todo_plan, envelope.session.active_todo_id);
+    await driveAgentStep({ user_message: null, action_results: [] });
+  } catch (err) {
+    addBubble("assistant", `Couldn't run playbook: ${err.message}`, { cls: "error" });
+  } finally {
+    setRunning(false);
+  }
 }
 
 // ── Sign-in (unchanged) ─────────────────────────────────────
@@ -887,8 +971,6 @@ homeBtn?.addEventListener("click", () => goHome());
 startSessionBtn?.addEventListener("click", startSession);
 playbooksBtn?.addEventListener("click", showPlaybooks);
 playbooksBack?.addEventListener("click", goHome);
-approveBtn?.addEventListener("click", approveCurrentTodo);
-rejectBtn?.addEventListener("click", rejectCurrentTodo);
 saveBtn?.addEventListener("click", () => savePlaybook().catch((e) => addBubble("assistant", e.message, { cls: "error" })));
 
 sendBtn?.addEventListener("click", () => sendMessage().catch((e) => addBubble("assistant", e.message, { cls: "error" })));
