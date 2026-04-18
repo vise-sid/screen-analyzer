@@ -51,49 +51,94 @@
             </svg>
           </button>
         </div>
-        <button id="newChatBtn" class="icon-btn" title="New conversation">
+        <button id="homeBtn" class="icon-btn hidden" title="Back to home">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 20h9"/>
-            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <polyline points="9 22 9 12 15 12 15 22"/>
           </svg>
         </button>
       </div>
     </header>
 
-    <!-- Log Area -->
-    <main class="content" id="logArea">
-      <div id="placeholder" class="placeholder">
-        <div class="placeholder-icon">
-          <img src="icons/icon128.png" style="width: 64px; height: 64px; image-rendering: pixelated; opacity: 0.7;" />
+    <!-- Landing view — two big buttons, shown before a session is active -->
+    <section id="landingView" class="landing-view">
+      <div class="landing-inner">
+        <div class="landing-icon">
+          <img src="icons/icon128.png" alt="PixelFoxx" />
         </div>
-        <p class="placeholder-text">What are we getting into today?</p>
-        <p class="placeholder-hint">Try: "Book a flight from Mumbai to Delhi for May 10"</p>
+        <h2 class="landing-title">What are we getting into today?</h2>
+        <p class="landing-sub">Start a fresh session, or run a saved playbook.</p>
+        <div class="landing-buttons">
+          <button id="startSessionBtn" class="landing-btn primary">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <polygon points="10 8 16 12 10 16 10 8"/>
+            </svg>
+            <span>Start Session</span>
+          </button>
+          <button id="playbooksBtn" class="landing-btn secondary">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+            </svg>
+            <span>My Playbooks</span>
+          </button>
+        </div>
       </div>
-    </main>
+    </section>
 
-    <!-- Footer / Input -->
-    <footer class="footer">
-      <div class="input-row">
-        <input
-          type="text"
-          id="taskInput"
-          class="task-input"
-          placeholder="What do you need, boss?"
-          autocomplete="off"
-        />
-        <button id="sendBtn" class="send-btn" title="Let's go">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-          </svg>
-        </button>
-        <button id="stopBtn" class="stop-btn hidden" title="Click: retry. Double-click: stop.">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-            <rect x="6" y="6" width="12" height="12" rx="2"/>
-          </svg>
-        </button>
+    <!-- Playbook list view — hidden until requested -->
+    <section id="playbooksView" class="playbooks-view hidden">
+      <div class="playbooks-header">
+        <h2>My Playbooks</h2>
+        <button id="playbooksBack" class="link-btn">← Back</button>
       </div>
-      <p class="footer-note">pixelfoxx.io</p>
-    </footer>
+      <div id="playbooksList" class="playbooks-list">
+        <div class="playbooks-empty">No saved playbooks yet.</div>
+      </div>
+    </section>
+
+    <!-- Chat session view — hidden until a session is active -->
+    <section id="chatView" class="chat-view hidden">
+      <div class="chat-todo-strip hidden" id="todoStrip">
+        <div class="todo-strip-header">
+          <span class="todo-strip-title">Plan</span>
+          <span class="todo-strip-count" id="todoStripCount"></span>
+        </div>
+        <ul class="todo-strip-list" id="todoStripList"></ul>
+      </div>
+
+      <div class="chat-thread" id="chatThread"></div>
+
+      <!-- Save Playbook button (shown when the agent marks session as ready_to_save) -->
+      <div id="saveBanner" class="save-banner hidden">
+        <span class="save-text">Playbook-worthy. Save it?</span>
+        <button id="saveBtn" class="save-btn">Save Playbook</button>
+      </div>
+
+      <footer class="footer">
+        <div class="input-row">
+          <input
+            type="text"
+            id="taskInput"
+            class="task-input"
+            placeholder="What do you need, boss?"
+            autocomplete="off"
+          />
+          <button id="sendBtn" class="send-btn" title="Send">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+            </svg>
+          </button>
+          <button id="stopBtn" class="stop-btn hidden" title="Pause">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="6" width="12" height="12" rx="2"/>
+            </svg>
+          </button>
+        </div>
+        <p class="footer-note">pixelfoxx.io</p>
+      </footer>
+    </section>
   </div>
 
   <script src="auth.js"></script>

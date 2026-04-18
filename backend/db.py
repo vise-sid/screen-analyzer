@@ -8,7 +8,6 @@ File location: backend/data.db (ignored by git). Safe to delete to reset.
 """
 
 from __future__ import annotations
-
 import os
 import sqlite3
 import threading
@@ -41,6 +40,22 @@ def init_db() -> None:
     with _lock:
         if _conn is None:
             _conn = _connect()
+
+        # One-shot migration: drop legacy builder_sessions if it still has the
+        # candidate_paths_json column (old harness schema). Dev-only; in-progress
+        # sessions are acceptable to lose.
+        cols = _conn.execute(
+            "SELECT name FROM pragma_table_info('builder_sessions')"
+        ).fetchall()
+        col_names = {row[0] for row in cols}
+        if cols and "candidate_paths_json" in col_names:
+            _conn.executescript(
+                """
+                DROP TABLE IF EXISTS session_messages;
+                DROP TABLE IF EXISTS builder_sessions;
+                """
+            )
+
         _conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -71,8 +86,91 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_usage_session
                 ON usage_events(session_id);
+
+            CREATE TABLE IF NOT EXISTS builder_sessions (
+                id                   TEXT PRIMARY KEY,
+                user_sub             TEXT NOT NULL,
+                status               TEXT NOT NULL,
+                intent_spec_json     TEXT NOT NULL,
+                site_models_json     TEXT NOT NULL DEFAULT '[]',
+                draft_block_graph_json TEXT NOT NULL DEFAULT '[]',
+                evidence_ledger_json TEXT NOT NULL DEFAULT '[]',
+                gate_state_json      TEXT NOT NULL DEFAULT '[]',
+                todo_plan_json       TEXT NOT NULL DEFAULT '{"todos":[]}',
+                active_todo_id       TEXT,
+                awaiting_approval    INTEGER NOT NULL DEFAULT 0,
+                gemini_contents_json TEXT NOT NULL DEFAULT '[]',
+                source_playbook_id   TEXT,
+                created_at           TEXT NOT NULL,
+                updated_at           TEXT NOT NULL,
+                FOREIGN KEY (user_sub) REFERENCES users(sub)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_builder_sessions_user_updated
+                ON builder_sessions(user_sub, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS session_messages (
+                id            TEXT PRIMARY KEY,
+                session_id    TEXT NOT NULL,
+                role          TEXT NOT NULL,
+                message_type  TEXT NOT NULL,
+                content       TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES builder_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_session_messages_session_created
+                ON session_messages(session_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS playbooks (
+                id                     TEXT PRIMARY KEY,
+                user_sub               TEXT NOT NULL,
+                title                  TEXT NOT NULL,
+                intent_spec_json       TEXT NOT NULL,
+                automation_grade       TEXT NOT NULL DEFAULT 'attended',
+                status                 TEXT NOT NULL DEFAULT 'active',
+                last_verified_at       TEXT,
+                markdown_render        TEXT NOT NULL,
+                generalized_inputs_json TEXT NOT NULL DEFAULT '[]',
+                loop_hints_json        TEXT NOT NULL DEFAULT '[]',
+                branch_hints_json      TEXT NOT NULL DEFAULT '[]',
+                source_session_id      TEXT,
+                created_at             TEXT NOT NULL,
+                updated_at             TEXT NOT NULL,
+                FOREIGN KEY (user_sub) REFERENCES users(sub)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_playbooks_user_updated
+                ON playbooks(user_sub, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS playbook_blocks (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                playbook_id          TEXT NOT NULL,
+                block_id             TEXT NOT NULL,
+                order_index          INTEGER NOT NULL,
+                type                 TEXT NOT NULL,
+                title                TEXT NOT NULL,
+                config_json          TEXT NOT NULL,
+                success_verifier     TEXT NOT NULL,
+                failure_policy       TEXT NOT NULL,
+                destructive          INTEGER NOT NULL DEFAULT 0,
+                requires_human_gate  INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (playbook_id) REFERENCES playbooks(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_playbook_blocks_order
+                ON playbook_blocks(playbook_id, order_index);
             """
         )
+
+        # Idempotent column adds for existing databases.
+        _add_column_if_missing(_conn, "builder_sessions", "source_playbook_id", "TEXT")
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 @contextmanager
@@ -203,6 +301,285 @@ def get_user_usage_summary(user_sub: str) -> dict[str, Any]:
         "calls": int(totals["calls"]),
         "today_usd": round(get_daily_cost_usd(user_sub), 6),
     }
+
+
+# ── Builder Sessions ───────────────────────────────────────────────────────
+
+def create_builder_session(
+    *,
+    session_id: str,
+    user_sub: str,
+    status: str,
+    intent_spec_json: str,
+    site_models_json: str = "[]",
+    draft_block_graph_json: str = "[]",
+    evidence_ledger_json: str = "[]",
+    gate_state_json: str = "[]",
+    todo_plan_json: str = '{"todos":[]}',
+    active_todo_id: str | None = None,
+    awaiting_approval: int = 0,
+    gemini_contents_json: str = "[]",
+    source_playbook_id: str | None = None,
+) -> None:
+    now = _now_iso()
+    with _cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO builder_sessions (
+                id, user_sub, status, intent_spec_json, site_models_json,
+                draft_block_graph_json, evidence_ledger_json, gate_state_json,
+                todo_plan_json, active_todo_id, awaiting_approval,
+                gemini_contents_json, source_playbook_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                user_sub,
+                status,
+                intent_spec_json,
+                site_models_json,
+                draft_block_graph_json,
+                evidence_ledger_json,
+                gate_state_json,
+                todo_plan_json,
+                active_todo_id,
+                awaiting_approval,
+                gemini_contents_json,
+                source_playbook_id,
+                now,
+                now,
+            ),
+        )
+
+
+def update_builder_session(
+    *,
+    session_id: str,
+    user_sub: str,
+    status: str,
+    intent_spec_json: str,
+    site_models_json: str,
+    draft_block_graph_json: str,
+    evidence_ledger_json: str,
+    gate_state_json: str,
+    todo_plan_json: str,
+    active_todo_id: str | None,
+    awaiting_approval: int,
+    gemini_contents_json: str,
+) -> None:
+    with _cursor() as cur:
+        cur.execute(
+            """
+            UPDATE builder_sessions
+            SET
+                status = ?,
+                intent_spec_json = ?,
+                site_models_json = ?,
+                draft_block_graph_json = ?,
+                evidence_ledger_json = ?,
+                gate_state_json = ?,
+                todo_plan_json = ?,
+                active_todo_id = ?,
+                awaiting_approval = ?,
+                gemini_contents_json = ?,
+                updated_at = ?
+            WHERE id = ? AND user_sub = ?
+            """,
+            (
+                status,
+                intent_spec_json,
+                site_models_json,
+                draft_block_graph_json,
+                evidence_ledger_json,
+                gate_state_json,
+                todo_plan_json,
+                active_todo_id,
+                awaiting_approval,
+                gemini_contents_json,
+                _now_iso(),
+                session_id,
+                user_sub,
+            ),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(f"Builder session not found: {session_id}")
+
+
+def get_builder_session(session_id: str, user_sub: str) -> dict[str, Any] | None:
+    with _cursor() as cur:
+        row = cur.execute(
+            """
+            SELECT *
+            FROM builder_sessions
+            WHERE id = ? AND user_sub = ?
+            """,
+            (session_id, user_sub),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_session_message(
+    *,
+    message_id: str,
+    session_id: str,
+    role: str,
+    message_type: str,
+    content: str,
+) -> None:
+    with _cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO session_messages
+                (id, session_id, role, message_type, content, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message_id,
+                session_id,
+                role,
+                message_type,
+                content,
+                _now_iso(),
+            ),
+        )
+
+
+def list_session_messages(session_id: str) -> list[dict[str, Any]]:
+    with _cursor() as cur:
+        rows = cur.execute(
+            """
+            SELECT id, session_id, role, message_type, content, created_at
+            FROM session_messages
+            WHERE session_id = ?
+            ORDER BY created_at ASC
+            """,
+            (session_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+# ── Playbooks ──────────────────────────────────────────────────────────────
+
+def create_playbook(
+    *,
+    playbook_id: str,
+    user_sub: str,
+    title: str,
+    intent_spec_json: str,
+    automation_grade: str,
+    status: str,
+    last_verified_at: str | None,
+    markdown_render: str,
+    generalized_inputs_json: str = "[]",
+    loop_hints_json: str = "[]",
+    branch_hints_json: str = "[]",
+    source_session_id: str | None = None,
+) -> None:
+    now = _now_iso()
+    with _cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO playbooks (
+                id, user_sub, title, intent_spec_json, automation_grade,
+                status, last_verified_at, markdown_render, generalized_inputs_json,
+                loop_hints_json, branch_hints_json, source_session_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                playbook_id,
+                user_sub,
+                title,
+                intent_spec_json,
+                automation_grade,
+                status,
+                last_verified_at,
+                markdown_render,
+                generalized_inputs_json,
+                loop_hints_json,
+                branch_hints_json,
+                source_session_id,
+                now,
+                now,
+            ),
+        )
+
+
+def insert_playbook_block(
+    *,
+    playbook_id: str,
+    block_id: str,
+    order_index: int,
+    block_type: str,
+    title: str,
+    config_json: str,
+    success_verifier: str,
+    failure_policy: str,
+    destructive: bool,
+    requires_human_gate: bool,
+) -> None:
+    with _cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO playbook_blocks (
+                playbook_id, block_id, order_index, type, title, config_json,
+                success_verifier, failure_policy, destructive, requires_human_gate
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                playbook_id,
+                block_id,
+                order_index,
+                block_type,
+                title,
+                config_json,
+                success_verifier,
+                failure_policy,
+                1 if destructive else 0,
+                1 if requires_human_gate else 0,
+            ),
+        )
+
+
+def get_playbook(playbook_id: str, user_sub: str) -> dict[str, Any] | None:
+    with _cursor() as cur:
+        row = cur.execute(
+            """
+            SELECT *
+            FROM playbooks
+            WHERE id = ? AND user_sub = ?
+            """,
+            (playbook_id, user_sub),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_playbooks(user_sub: str) -> list[dict[str, Any]]:
+    with _cursor() as cur:
+        rows = cur.execute(
+            """
+            SELECT *
+            FROM playbooks
+            WHERE user_sub = ?
+            ORDER BY updated_at DESC
+            """,
+            (user_sub,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def list_playbook_blocks(playbook_id: str) -> list[dict[str, Any]]:
+    with _cursor() as cur:
+        rows = cur.execute(
+            """
+            SELECT playbook_id, block_id, order_index, type, title, config_json,
+                   success_verifier, failure_policy, destructive, requires_human_gate
+            FROM playbook_blocks
+            WHERE playbook_id = ?
+            ORDER BY order_index ASC
+            """,
+            (playbook_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 # Initialise on import so the rest of the app can call helpers directly.
