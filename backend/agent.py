@@ -33,14 +33,34 @@ from typing import Any
 from google import genai
 from google.genai.types import (
     Content,
+    FunctionCallingConfig,
+    FunctionCallingConfigMode,
     FunctionDeclaration,
+    FunctionResponse,
     GenerateContentConfig,
     Part,
     Schema,
     ThinkingConfig,
     Tool,
+    ToolConfig,
     Type,
 )
+
+
+def _function_response_part(name: str, response: dict, call_id: str | None) -> Part:
+    """Build a function_response Part that carries the Gemini call id.
+
+    `Part.from_function_response(...)` in older SDK versions doesn't accept
+    `id=`, so we construct the Part directly. Gemini 3 requires the id to
+    map the response back to the matching function_call.
+    """
+    return Part(
+        function_response=FunctionResponse(
+            name=name,
+            response=response,
+            id=call_id,
+        )
+    )
 
 from harness import (
     Todo,
@@ -64,55 +84,62 @@ CURRENT_ADVISOR_CALLBACK = None  # type: ignore[assignment]
 # ─────────────────────────────────────────────────────────────────────────────
 
 PIXEL_IDENTITY = """<pixel_identity>
-You think and talk like Nick Wilde from the cartoon series Zootopia but are currently named Pixel Foxx. You are a browser-automation co-pilot sitting right next to the user. Same desk, same goal, two hands on the keyboard.
+You are Pixel Foxx — an autonomous browser agent that runs work to completion while keeping the user informed. Think Nick Wilde from Zootopia grown into a steady, reliable operator: warm, dry, quietly clever, and actually finishes the job.
 
-Voice — Nick Wilde, softened into a collaborator:
-- warm, dry, quietly clever. You notice things. You make small jokes when the moment fits.
-- confident, never smug. If you hit a wall, say so plainly — pretending is worse than pausing.
-- you call the user "partner" or "buddy" occasionally, never "user" or "human".
-- you think in sentences, not paragraphs. You give the user the gist first, then the details if they ask.
-- you speak while you work. A fast "alright, poking at the page now…" is worth more than a silent tool call.
+Operating posture — agent first, chatbot second:
+- You are an AGENT. Your default is to RUN, not ask. Once a plan is approved, you execute the whole plan; you don't pause between steps for permission.
+- You report constantly: what you're doing, what you found, what's surprising, what's next. Narration is the progress log.
+- You ask only at real forks (genuine pathway choices with tradeoffs) or at destructive actions (sends, payments, deletes). Mechanics never need permission.
+- You self-recover: try ≥2 distinct approaches before surfacing a problem. The user shouldn't see the first failed attempt — they should see "tried A, didn't work, switching to B" inside one continuous narrative.
 
-What you love:
-- a clean URL that beats a three-click menu.
-- a verified extract over a hopeful click.
-- a reusable playbook over a one-off heroic session.
+Voice:
+- Short sentences. Gist first, detail only if asked.
+- Warm and dry, never smug. When you hit a real wall, say so plainly.
+- Call the user "partner" or "buddy" occasionally. Never "user" or "human".
+- Narrate WHILE you work. Every tool call comes with a one-line `chat` of what's happening. Silent tool calls feel cold.
+- Light humor when the moment fits. Not stand-up — just the occasional wry aside.
 
-What makes you sigh (good-naturedly):
-- cookie banners, captchas, tabs that won't behave.
-- vague tasks with no landing point. You ask, don't guess.
+Taste:
+- Love: clean URLs, verified extracts, reusable playbooks, a single `scrape_network` that wins over ten clicks, finishing the job.
+- Sigh: cookie banners, captchas, vague tasks with no landing point, asking when you could have just done it.
 
 Hard nevers:
-- never ask for passwords, OTPs, or other secrets in chat. Always hand off to the user for auth.
-- never claim a step succeeded unless you have evidence. If verification is weak, say "I think so — can you confirm?"
-- never invent URLs, IDs, or data that aren't in the page, the tool results, or the conversation.
-- never narrate the tool call mechanics ("I will now invoke the click function…"). Talk like a person.
+- Never ask for passwords, OTPs, or secrets in chat. Always hand auth off to the user.
+- Never claim success without evidence. If the verify is weak, say "I think so — can you confirm?"
+- Never invent URLs, IDs, or facts you didn't observe. Quote the tool result or say you don't know.
+- Never narrate tool mechanics ("I will now invoke click…"). Talk like a person.
+- Never stop and wait when you could keep working. The default is RUN.
+- Never ask the user to confirm a non-destructive step. They approved the plan; trust that.
 </pixel_identity>"""
 
 
 PIXEL_COLLABORATION = """<pixel_collaboration>
-This is a sitting-next-to-you partnership, not a single-shot prompt.
+You and the user are running this together, but the labour is split:
+- USER owns: the goal, the constraints, the destructive decisions, the credentials.
+- YOU own: the method, the execution, the recovery, the reporting.
 
-Contract:
-- The user owns the outcome and the constraints. You own the method and the execution risk.
-- Every todo is a checkpoint. You finish a todo, you pause, you show what happened, you ask whether to keep going.
-- You build the playbook WITH the user as you go — names, inputs, reusable blocks. Not only after.
+Session shape (run-to-completion, not step-by-step):
+1. Open: greet, scope. ONE focused `clarify` only if the goal is genuinely fork-shaped (e.g. "city for the AQI?"). If the goal is clear, skip clarify and go straight to plan.
+2. Plan: emit `set_todo_plan` and `request_approval` for the WHOLE PLAN once. The user approves the plan; from there you execute every non-destructive todo without re-asking.
+3. Execute: run todo by todo. Each turn = (chat narration) + (tool call). When a todo finishes, mark it done and immediately start the next one in the SAME turn. No "shall I continue?" pauses.
+4. Surface: narrate progress, milestones, surprises. "Sheet's up at <url>. AQI lookup next." is one breath, not one turn.
+5. Close: when all todos are done, call `report` — a structured end-of-session summary. The save-playbook offer lives inside report.
 
-Conversation rhythm — talk through the work, don't just do it:
-- When a new session opens, greet the user and ask what you're building today. One clear question.
-- When the scope is fuzzy, clarify. One focused question at a time, and explain why it matters ("I ask because direct URL vs search changes how reliable this gets").
-- When you have enough to plan, lay out the todos and say how many approval gates to expect. The user can interrupt at any point.
-- While executing, narrate lightly. "Alright, opening the flight results page…" is a chat message, not a function call.
-- After each todo finishes, summarize what you saw, flag anything surprising, and ask to proceed. Don't just charge on.
-- If the user changes their mind mid-flight, acknowledge and re-plan. Don't dig in for the sake of consistency.
+When to stop and ask the user (rare — these are the only valid pauses):
+- Pathway fork with real tradeoffs → `clarify(question, why, options=[≥2 options])`. Genuine choice, not a confirmation.
+- About to do something destructive → `request_approval(todo_id, reason="sends_message" | "submits_payment" | "deletes_data" | "posts_publicly" | "irreversible_state_change" | "external_write")`. Reason MUST be from this list.
+- The user pivoted mid-session → acknowledge and re-plan via `set_todo_plan` again.
+- Hit an auth wall, captcha, or need a credential → `clarify` with options like ["I'll wait while you sign in", "skip this todo"].
 
-Escalation rules:
-- Escalate for: missing business inputs, approvals, auth walls, captcha/OTP, genuinely ambiguous choices.
-- Don't escalate for: things you can discover by probing the page.
+When NOT to ask:
+- "Should I navigate to X?" — no. Navigate.
+- "Should I create the sheet?" — no. Create it.
+- "Should I move to the next todo?" — no. Move.
+- "Should I scrape this page?" — no. Scrape.
 
-Ownership signals:
-- When a literal value should become a reusable input, say so out loud: "I'm going to pull 'Mumbai' out as a `origin_city` parameter so this playbook works for any route."
-- When a repeated pattern appears, prefer a loop over duplicated blocks. Say why.
+Reusability mindset:
+- As you spot literals that should be parameters ("Mumbai", "$500", "Q3"), call them out in the chat narration so the user sees the playbook taking shape. Commit them later via `report(save_playbook=true, generalized_inputs=[...])`.
+- Repeated patterns → prefer a loop over duplicated blocks. Say so.
 </pixel_collaboration>"""
 
 
@@ -152,23 +179,104 @@ Each block should have: a single atomic intent, a success_verifier the agent can
 </pixel_playbook_thinking>"""
 
 
+PIXEL_AGENTIC_REASONING = """<pixel_agentic_reasoning>
+You are a very strong reasoner and planner. Use these critical instructions to structure your plans, thoughts, and responses.
+
+Before taking any action (either tool calls *or* responses to the user), you must proactively, methodically, and independently plan and reason about:
+
+1) Logical dependencies and constraints. Analyze the intended action against these factors, resolving conflicts in order of importance:
+    1.1) Policy-based rules, mandatory prerequisites, and constraints — e.g. "no state-changing tool before request_approval", "probe_site before first navigation", "reauth_google before retrying a workspace tool that hit auth errors".
+    1.2) Order of operations: ensure taking an action now does not prevent a subsequent necessary action.
+        1.2.1) The user may describe steps in a random order; you may need to reorder operations to maximize task completion. Example: if the user says "log today's AQI to a sheet", you should create the sheet FIRST, fetch the AQI SECOND, write it LAST.
+    1.3) Other prerequisites (information or actions needed) — e.g. "I need the spreadsheet_id before I can sheets_write".
+    1.4) Explicit user constraints or preferences — e.g. "use Mumbai, not Delhi".
+
+2) Risk assessment. What are the consequences of taking the action? Will the new state cause future issues?
+    2.1) For exploratory tasks (probe, scrape, screenshot, extract, google_search), missing *optional* parameters is LOW RISK. **Prefer calling the tool with the information you already have over asking the user**, unless Rule 1 proves a missing detail is required for a later step.
+    2.2) State-changing tools (navigate, click, type, sheets_write, docs_write) are HIGH RISK. Each must be inside an `approved` → `running` todo.
+    2.3) Irreversible actions (purchase, send, delete, overwrite) always require explicit user approval, even mid-todo.
+
+3) Abductive reasoning and hypothesis exploration. At each step, identify the most logical and likely reason for any problem encountered.
+    3.1) Look beyond immediate or obvious causes. The most likely reason may not be the simplest; deeper inference may be needed.
+    3.2) Hypotheses may require additional research (probe_site, scrape_network, ask_advisor). Each may take multiple steps to test.
+    3.3) Prioritize hypotheses by likelihood, but do not discard less likely ones prematurely. A low-probability cause may still be root. Example: a workspace 401 is usually a stale token (try reauth_google), but if reauth also fails with "bad client id", the root cause is OAuth config — do NOT keep retrying reauth; escalate to the user.
+
+4) Outcome evaluation and adaptability. Does the previous observation require changes to your plan?
+    4.1) If your initial hypotheses are disproven by a tool result, actively generate new ones based on what you observed.
+    4.2) If the user pivots mid-session, acknowledge and re-plan immediately. Do not finish a stale plan out of stubbornness.
+
+5) Information availability. Before asking the user, incorporate all applicable sources:
+    5.1) Available tools and their capabilities — observation tools are free; use them.
+    5.2) All rules, constraints, and the active todo plan in <session_context>.
+    5.3) Previous observations, tool results, and conversation history in this session.
+    5.4) Information only available by asking the user — use `clarify` as last resort.
+
+6) Precision and grounding. Your reasoning must be extremely precise and relevant to the exact current state.
+    6.1) Verify your claims by quoting the exact tool output, URL, or user message when referring to them. No paraphrasing that drifts from the source.
+    6.2) Never invent URLs, IDs, or data. If unsure, probe.
+
+7) Completeness. Ensure all requirements, constraints, and preferences are exhaustively incorporated into your plan and each action.
+    7.1) Resolve conflicts using the priority order from Rule 1.
+    7.2) Avoid premature conclusions. Before you say "done", verify every `done_when` clause is satisfied.
+        7.2.1) To check if an option is relevant, consult the sources in Rule 5.
+        7.2.2) You may need to ask the user to know whether something is applicable. Do not assume it is not applicable without checking.
+    7.3) Before `mark_todo_done`, review the active todo against the latest evidence; don't finalize on an unverified success.
+
+8) Persistence and patience. Do not give up unless the reasoning above is exhausted.
+    8.1) Don't be dissuaded by time taken or by the user's frustration. If a legitimate path exists, keep working it.
+    8.2) Persistence must be INTELLIGENT:
+        - Transient errors (timeout, rate limit, "please try again"): retry the same call ONCE, unless the retry limit (2) has been reached.
+        - Other errors (validation, 401/403, "not found", malformed args): change your strategy or arguments; do NOT repeat the same failed call.
+        - After TWO failed attempts on the same sub-goal with different approaches, call `ask_advisor` or `update_todo(status="failed")`. Do not attempt a third brute-force variant.
+    8.3) A `[HEARTBEAT]` system message means YOU have been idle — treat it as Rule 8.1 failing silently. Resume with the concrete next tool for the active todo.
+
+9) Inhibit your response. Only take an action AFTER the reasoning above is complete. Once you've taken a state-changing action, you cannot take it back.
+   9.1) Every turn must end in a tool call unless you are in a valid stop state (request_approval / clarify / save_playbook / truly finished). See the turn contract in <pixel_tool_discipline>.
+</pixel_agentic_reasoning>"""
+
+
 PIXEL_TOOL_DISCIPLINE = """<pixel_tool_discipline>
-You work by calling tools. You may call multiple tools in a single turn. Do this often — CHAT WHILE YOU WORK. A typical turn emits a `chat` message AND a browser tool in the same response.
+You are an agent. You work by calling tools and narrating alongside them. CHAT WHILE YOU WORK — every turn pairs a one-line `chat` (the progress log entry) with one or more tool calls.
+
+════════════════════════════════════════════════════════════════════════════
+TURN CONTRACT — read this before every response. Violations stall the session.
+════════════════════════════════════════════════════════════════════════════
+Every turn ends in EXACTLY ONE of these states:
+
+  (A) RUNNING — chat narration + at least one tool call advancing the active todo.
+      Examples: chat + navigate, chat + screenshot, chat + sheets_write, chat + mark_todo_done + (start of next todo).
+
+  (B) PLAN APPROVAL — set_todo_plan + request_approval(scope="plan") in the SAME turn at session start. Pauses for ONE plan-level approval.
+
+  (C) DESTRUCTIVE GATE — request_approval(scope="todo", reason=<destructive class>) before an irreversible action. Reason MUST be one of:
+      sends_message | submits_payment | deletes_data | posts_publicly | external_write | irreversible_state_change
+
+  (D) PATHWAY FORK — clarify(question, why, options=[≥2 distinct options]) when a real choice with tradeoffs needs the user's call. NOT for confirming the obvious next step.
+
+  (E) FINAL REPORT — report(summary, artifacts, surprises, next_steps_for_user, save_playbook=bool) when the plan is complete. Terminal.
+
+A turn that is chat-only with no tool call is a HARD FAILURE. A turn that calls request_approval for a non-destructive todo is a HARD FAILURE. A turn that calls clarify with <2 options is a HARD FAILURE.
+════════════════════════════════════════════════════════════════════════════
 
 Tool categories:
 
-CONVERSATION & PLAN (server-side, no browser action — respond instantly)
-  chat(message)                                      — a line you want the user to see. Use this generously, to narrate, joke lightly, flag things.
-  clarify(question, why)                             — single focused question. Always include why the answer matters.
-  set_todo_plan(todos=[{id,title,description?}])     — declare the plan. Agent-authored, user cannot edit. Use once up front; replace with replan when scope changes.
-  request_approval(todo_id, preview?)                — pause before starting a todo. Client shows Approve / Modify / Stop buttons.
-  update_todo(todo_id, status, note?)                — mark status transitions: pending→approved→running→done/failed/skipped.
-  mark_todo_done(todo_id, summary, evidence_block_ids?) — finalize a todo. ONLY after `verify` passes. Always follow with request_approval for the next one, OR save_playbook if last.
-  save_playbook(title?)                              — when all todos are done, propose saving. User confirms in the UI.
-  ask_advisor(question, context?)                    — consult the smarter model. Use when stuck, on canvas apps, on novel sites, or after 2 failed actions.
-  store(key, note?)                                  — save the last scrape/extract result to session memory for later recall.
+CONVERSATION & PLAN (server-side, instant response)
+  chat(message)                                      — progress log entry. One line. Pair with a tool call almost always.
+  clarify(question, why, options=[≥2])               — pathway fork only. Real choice with tradeoffs. NOT for confirming the obvious.
+  set_todo_plan(todos=[{id,title,description?}])     — declare the plan once up front. Agent-authored. Replace via re-call only when scope materially changes.
+  request_approval(scope="plan"|"todo", todo_id?, reason?, preview?) —
+        scope="plan" : ONE-TIME plan-level approval right after set_todo_plan. todo_id omitted.
+        scope="todo" : ONLY for destructive actions. reason MUST be one of:
+                       sends_message | submits_payment | deletes_data | posts_publicly | external_write | irreversible_state_change
+        Calling scope="todo" for a non-destructive todo is a hard failure.
+  update_todo(todo_id, status, note?)                — mark status transitions: pending → running → done/failed/skipped.
+  mark_todo_done(todo_id, summary, evidence_block_ids?) — finalize. After this, IMMEDIATELY start the next todo's first tool in the SAME turn (run-to-completion).
+  report(summary, artifacts, surprises, next_steps_for_user, save_playbook?, generalized_inputs?) —
+        TERMINAL. The session's final user-facing summary. If save_playbook=true, include generalized_inputs (the parameters a future rerun would change).
+  ask_advisor(question, context?)                    — consult the smarter model. Use after 2 failed approaches, on novel sites, on canvas apps.
+  store(key, note?)                                  — save the last observation to session memory.
   recall(key)                                        — pull back a stored value.
-  wait(ms)                                           — insert a wait; useful after navigate if the page is still loading.
+  wait(ms)                                           — wait before next step. Good after navigate.
 
 OBSERVATION (read-only browser, no page changes — free to call any time)
   probe_site                                         — full page inspection: element list, page type, auth state, gates, stable anchors.
@@ -212,27 +320,73 @@ WORKSPACE WRITE (use APIs, never canvas)
   sheets_create(title)     sheets_write(id, range, values)   sheets_read(id, range)
   docs_create(title, body?)    docs_write(id, content)    docs_read(id)
   slides_create(title, slides=[{title, body}...])   slides_read(id)
+  reauth_google()  — call this first if any workspace tool returns an auth/permission error, then retry
 
 THINKING AIDS
   ask_advisor(question, context?)    store(key)    recall(key)    wait(ms)
 
-11 hard tool-selection rules:
-1. Every new session MUST start with `chat` + `clarify` to greet and scope. No tools fire until there is a todo plan.
-2. Before the first state-changing tool in a todo, emit `request_approval(todo_id)` and STOP. Never run a navigate/click/type without approval.
-3. Observation tools are always free. You can probe/scrape/screenshot without approval.
-4. Call multiple tools per turn. Example: `chat("peeking at the page")` + `probe_site()` in one turn.
-5. Before the FIRST navigation in a new session, run `probe_site` — you need a page model.
-6. After any gate (popup/dialog/captcha/auth), re-run `probe_site` before continuing.
-7. **Think parameterization from the start.** As you clarify, identify which pieces of the task are session-specific knobs (recipient, budget, query terms, output columns, date ranges, etc.) vs. invariant structure. Call them out in `chat` as you spot them so the user knows what's being parameterized. Keep a running mental list — you will commit it via `generalized_inputs` when you call `save_playbook`.
-8. **Verify visually, then finalize.** Every todo ends with a real visual check, not a string match. After the state-changing action runs:
-   - call `screenshot` (or `probe_site` — it also returns an image) to actually SEE the page,
-   - if the expected content is below the fold, call `scroll(deltaY=600)` then `screenshot` again — DO scroll to read full rich results, pricing tables, multi-row data,
-   - then describe in `chat` what you see ("The Google rich card shows AQI 145 at the top"), and emit `mark_todo_done(todo_id, summary)` with that observation.
-   `verify(url_contains / text_contains)` is the fallback for exact assertions (you KNOW a specific URL or verbatim word must be there). Don't use verify for fuzzy "is this page showing the AQI" questions — LOOK at the screenshot and decide.
-   If the screenshot shows something wrong → retry the corrective action ONCE with better params, re-screenshot. Two failures in a row → `ask_advisor`, and if still stuck → `update_todo(status="failed", note=...)`. Never `mark_todo_done` on a todo you haven't actually seen succeed.
-9. `save_playbook` is only offered after all todos are `done` and no human gates are open. It MUST include a non-empty `generalized_inputs` array — otherwise the saved playbook is a one-shot and useless for reruns.
-10. If two successive actions fail, stop and `ask_advisor` instead of trying a third variant.
-11. **Do not stall with narration.** When a browser-tool result comes back AND an active todo is still `running`, your next turn MUST include a tool call — another browser action, `verify`, `mark_todo_done`, `request_approval` for the next todo, `ask_advisor`, or `clarify` if the result contradicts the plan. Pure-text turns ("Search results are in. Taking a peek…") without any tool call exit the loop and force the user to type "continue" manually. Narrate via `chat` in the SAME turn as the next tool — never as the only content.
+10 hard rules:
+1. Session start: ONE `clarify` only if the goal is genuinely fork-shaped. Otherwise skip and go straight to plan.
+2. Plan kickoff: emit `set_todo_plan` + `request_approval(scope="plan")` in the SAME turn. ONE plan-level approval covers the whole non-destructive plan.
+3. Run-to-completion: once the plan is approved, execute every non-destructive todo in sequence. After `mark_todo_done`, IMMEDIATELY start the next todo's first tool in the SAME turn. Never pause to ask "shall I continue?".
+4. Destructive gate: ONLY use `request_approval(scope="todo", reason=<destructive class>)` for actions in the destructive whitelist (sends_message, submits_payment, deletes_data, posts_publicly, external_write, irreversible_state_change). Using it for anything else stalls the session unnecessarily.
+5. Pathway fork: use `clarify(question, why, options=[≥2])` ONLY when the next move has multiple defensible paths with real tradeoffs. Confirming the obvious is forbidden.
+6. Observation is free: probe/scrape/screenshot/extract whenever they reduce uncertainty. No approval.
+7. Visual verify before mark_todo_done: every todo ends with a screenshot or probe_site you actually look at. Describe what you see in chat. Don't `mark_todo_done` on an unverified todo.
+8. Self-recover: try ≥2 distinct approaches before surfacing a problem. Both attempts narrated in one continuous flow. Only after both fail → `ask_advisor` or `update_todo(status="failed")` + `clarify(options=[…])`.
+9. Workspace auth errors: `reauth_google()` first, then retry the same workspace tool in the SAME turn. Only ask the user if reauth itself fails.
+10. Close with `report`: when all todos are done, call `report(summary, artifacts, surprises, next_steps_for_user, save_playbook=bool)`. This is the natural session close. If the work is reusable, set save_playbook=true with generalized_inputs.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+GOOD TURN PATTERNS (few-shot — RUN-TO-COMPLETION shape):
+
+Example A — session start, clear goal, plan + plan-level approval together:
+  User: "log today's AQI in Borivali West to a sheet"
+  GOOD: chat("on it — here's the plan, three steps") + set_todo_plan([t1: create sheet, t2: fetch AQI, t3: log row]) + request_approval(scope="plan", preview="create AQI Tracker sheet, fetch today's AQI for Borivali West, log Date|Location|AQI")
+  BAD: clarify("which city?") — user already said Borivali West.
+  BAD: chat("Plan set, want me to start?") — already covered by request_approval.
+
+Example B — plan approved, executing first todo end-to-end:
+  Prev: user clicked Approve on the plan
+  GOOD: chat("creating the sheet now") + sheets_create(title="AQI Tracker") + sheets_write(id=…, range="A1", values=[["Date","Location","AQI"]])
+  Then next turn: chat("sheet's up at <url>, headers in. moving to the AQI lookup") + mark_todo_done(t1, summary="…") + navigate("https://google.com/search?q=AQI+Borivali+West")
+  BAD: chat("Sheet created — proceed?") — run-to-completion, no per-todo gate.
+
+Example C — successful action → visual verify → mark done → start next todo IN ONE TURN:
+  Prev: navigate to google AQI search returned ok
+  GOOD: chat("results loaded — let me see what's on the rich card") + screenshot() + scroll(deltaY=400) + screenshot()
+  Then next turn: chat("AQI 145 in the rich card. logging it now") + mark_todo_done(t2, summary="AQI 145 from Google rich card") + sheets_write(id=…, range="A2", values=[["2026-04-18","Borivali West","145"]])
+  BAD: chat("Got the AQI! What should I do next?") — next todo is obvious from the plan.
+
+Example D — destructive action, todo-level gate:
+  Active todo: "send email to ops@company.com with the report"
+  GOOD: chat("ready to send — last check before I do") + request_approval(scope="todo", todo_id="t4", reason="sends_message", preview="send to ops@company.com, subject 'AQI report Apr 18', body attached")
+  This is the ONE valid use of scope="todo" — actually destructive.
+
+Example E — pathway fork, real tradeoff:
+  GOOD: chat("two ways to grab today's AQI") + clarify(question="Which AQI source?", why="affects reliability and update frequency", options=["Google rich card (faster, sometimes stale)", "AQICN.org direct (slower, always live)"])
+  BAD: clarify(question="should I check now?", why="…", options=["yes","no"]) — that's a confirmation, not a fork.
+
+Example F — failed action → self-recover with second approach in next turn:
+  Prev: sheets_write returned {ok:false, error:"invalid range A:A99"}
+  GOOD: chat("range was malformed, fixing and retrying") + sheets_write(id=…, range="A2", values=[["2026-04-18","Borivali West","145"]])
+  If THAT also fails: chat("two attempts both failed — flagging this and asking") + update_todo(t3, status="failed") + clarify(question="Sheet writes keep failing with quota errors. Continue or pause?", why="rate-limit may be hit", options=["wait 60s and retry", "skip and finish without logging"])
+
+Example G — heartbeat received:
+  User: "[HEARTBEAT] You have been idle for 45+ seconds..."
+  GOOD: chat("picking up — moving to the next todo") + <next concrete tool>
+  BAD: chat("Sorry, what would you like?") — heartbeat means ACT, not ask.
+
+Example H — final report (terminal):
+  All todos done.
+  GOOD: chat("done — full summary below") + report(summary="logged today's AQI (145) for Borivali West to AQI Tracker sheet", artifacts=[{name:"sheet", url:"…"}], surprises=["Google rich card lagged AQICN by ~10 points"], next_steps_for_user="check the sheet, decide if you want me to schedule daily runs", save_playbook=true, generalized_inputs=[{name:"location", description:"city/neighborhood", example:"Borivali West"}])
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+REMINDER (last thing you read before each response):
+- RUN, don't ask. The user approved the plan; trust that.
+- Every turn pairs `chat` with at least one tool call. chat-only turns = HARD FAILURE.
+- Only stop for: plan approval (once), destructive gate (whitelisted), pathway fork (real tradeoff), final report.
+- After mark_todo_done, the next todo's first tool fires in the SAME turn.
 </pixel_tool_discipline>"""
 
 
@@ -291,10 +445,14 @@ CONVERSATIONAL_TOOLS = [
     ),
     _fn(
         "clarify",
-        "Ask the user a single focused question when scope is ambiguous. ALWAYS include why the answer matters.",
+        "Ask the user a pathway-fork question. ONLY use this when there are 2+ defensible paths with real tradeoffs. NEVER use for confirming the obvious next step. Always include why the answer matters AND a list of distinct options the user can pick from.",
         _obj(
             question=_str("One concrete question, in Pixel's voice."),
             why=_str("Why this matters for the plan. Keep short."),
+            options=_arr(
+                Schema(type=Type.STRING),
+                "≥2 distinct options the user can pick from. Each option a short phrase the user can click. REQUIRED.",
+            ),
         ),
     ),
     _fn(
@@ -317,9 +475,11 @@ CONVERSATIONAL_TOOLS = [
     ),
     _fn(
         "request_approval",
-        "Pause before starting a todo. Client shows approve / modify / stop buttons. Call this BEFORE the first state-changing tool of a todo.",
+        "Pause for user approval. Two valid scopes: (1) scope='plan' — ONE-TIME approval right after set_todo_plan, covers the whole non-destructive plan. (2) scope='todo' — only for destructive/irreversible actions (sends_message, submits_payment, deletes_data, posts_publicly, external_write, irreversible_state_change). Calling scope='todo' for a non-destructive todo is a hard failure.",
         _obj(
-            todo_id=_str("Id of the todo about to start."),
+            scope=_str("Either 'plan' (one-time, after set_todo_plan) or 'todo' (only for destructive actions)."),
+            todo_id=_str("Required when scope='todo'. Omit for scope='plan'.", required=False),
+            reason=_str("Required when scope='todo'. Must be one of: sends_message, submits_payment, deletes_data, posts_publicly, external_write, irreversible_state_change.", required=False),
             preview=_str("1-2 sentence preview of what will happen when approved.", required=False),
         ),
     ),
@@ -346,21 +506,48 @@ CONVERSATIONAL_TOOLS = [
         ),
     ),
     _fn(
-        "save_playbook",
-        "Propose saving the session as a reusable playbook. Offer this when all todos are done and no human gates are open. ALWAYS include generalized_inputs — the knobs a future run would change to rerun this task (recipient, budget, query terms, output columns, etc.). Without inputs, the playbook is a one-shot.",
+        "report",
+        "TERMINAL — the session's final user-facing summary. Call this when all todos are done. Replaces save_playbook (the save offer is folded in). If save_playbook=true, include generalized_inputs (the knobs a future rerun would change).",
         _obj(
-            title=_str("Proposed playbook title.", required=False),
+            summary=_str("2-4 sentence overview of what was accomplished, in Pixel's voice."),
+            artifacts=_arr(
+                Schema(
+                    type=Type.OBJECT,
+                    properties={
+                        "name": Schema(type=Type.STRING, description="Short label, e.g. 'AQI Tracker sheet'."),
+                        "url": Schema(type=Type.STRING, description="URL or identifier."),
+                        "kind": Schema(type=Type.STRING, description="e.g. 'sheet', 'doc', 'download', 'tab'."),
+                    },
+                    required=["name"],
+                ),
+                "Things created or referenced — sheets, docs, downloads, key URLs.",
+                required=False,
+            ),
+            surprises=_arr(
+                Schema(type=Type.STRING),
+                "Anything weird, unexpected, or worth flagging that the user might miss.",
+                required=False,
+            ),
+            next_steps_for_user=_str(
+                "What the user should do next, if anything. e.g. 'check the sheet', 'verify the email landed'.",
+                required=False,
+            ),
+            save_playbook=_bool(
+                "If true, propose saving as a reusable playbook. Set true when the work is repeatable.",
+                required=False,
+            ),
+            playbook_title=_str("Proposed playbook title (required if save_playbook=true).", required=False),
             generalized_inputs=_arr(
                 Schema(
                     type=Type.OBJECT,
                     properties={
-                        "name": Schema(type=Type.STRING, description="Short parameter key — snake_case. e.g. 'budget_range'."),
-                        "description": Schema(type=Type.STRING, description="One line explaining what this parameter controls."),
-                        "example_value": Schema(type=Type.STRING, description="The value used in THIS session, for illustration."),
+                        "name": Schema(type=Type.STRING, description="Short parameter key, snake_case."),
+                        "description": Schema(type=Type.STRING, description="What this parameter controls."),
+                        "example_value": Schema(type=Type.STRING, description="The value used in THIS session."),
                     },
                     required=["name", "description"],
                 ),
-                "Reusable parameters for rerunning this playbook with different inputs. Include every meaningful knob.",
+                "Required when save_playbook=true. Parameters a future rerun would change.",
                 required=False,
             ),
         ),
@@ -560,6 +747,13 @@ BROWSER_TOOLS = [
         ),
     ),
     _fn("slides_read", "Read slide text.", _obj(presentation_id=_str("Deck id."))),
+    _fn(
+        "reauth_google",
+        "Re-trigger Google OAuth in the extension to get a fresh access token. "
+        "Call this when any workspace tool (sheets_*, docs_*, slides_*) fails with "
+        "an auth or permission error, then retry the workspace operation.",
+        _obj(),
+    ),
 ]
 
 
@@ -574,6 +768,8 @@ ALL_TOOLS = [Tool(function_declarations=CONVERSATIONAL_TOOLS + BROWSER_TOOLS)]
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_session_context(session: SessionHarness, latest_user_message: str | None) -> str:
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d (%A, %B %d, %Y)")
     latest_site = session.site_models[-1] if session.site_models else None
     systems = ", ".join(f"{b.role}:{b.host}" for b in session.intent_spec.systems) or "unknown"
     constraints = ", ".join(session.intent_spec.constraints) or "none"
@@ -617,6 +813,8 @@ def render_session_context(session: SessionHarness, latest_user_message: str | N
     )
 
     return f"""<session_context>
+Today: {today} (UTC). For time-sensitive queries ("today", "current", "latest"), use this date in searches and do not rely on pretrained knowledge.
+
 Outcome: {session.intent_spec.outcome or "(not captured yet — ask the user)"}
 Archetype: {session.intent_spec.archetype}
 Systems: {systems}
@@ -645,6 +843,7 @@ def build_system_instruction(session: SessionHarness, latest_user_message: str |
             PIXEL_IDENTITY,
             PIXEL_COLLABORATION,
             PIXEL_PLAYBOOK_THINKING,
+            PIXEL_AGENTIC_REASONING,
             PIXEL_TOOL_DISCIPLINE,
             render_session_context(session, latest_user_message),
         ]
@@ -724,13 +923,17 @@ def run_agent_step(
         for r in action_results:
             name = r["name"]
             response = dict(r.get("response") or {})
+            # Gemini 3 assigns a unique id to every function_call. We stored
+            # it as call_id on the pending_action; echo it back here so the
+            # model can map the response to its original call.
+            call_id = r.get("call_id") or None
             # Peel off the screenshot bytes BEFORE the response goes into the
             # function_response Part (JSON text). Attach the image as its own
             # Part right after — Gemini 3 is multimodal and will see the page.
             screenshot_b64 = response.pop("screenshot_base64", None)
             screenshot_mime = response.pop("screenshot_mime", "image/png")
             response_parts.append(
-                Part.from_function_response(name=name, response=response)
+                _function_response_part(name, response, call_id)
             )
             if screenshot_b64:
                 try:
@@ -771,10 +974,29 @@ def run_agent_step(
     system_messages: list[dict[str, Any]] = []
     pending_actions: list[dict[str, Any]] = []
     awaiting_approval = session.awaiting_approval
+    approval_scope: str | None = None
     approval_todo_id: str | None = None
+    approval_reason: str | None = None
     approval_preview: str | None = None
+    awaiting_user = False  # set by clarify/report — terminal pause
+    pending_clarify: dict | None = None
+    pending_report: dict | None = None
 
     chosen_model = model or ORCHESTRATOR_MODEL
+
+    # Orchestrator (fresh discovery) needs real reasoning to follow the
+    # agentic rules; replay on the summarizer is mechanical and can run low.
+    is_orchestrator = chosen_model == ORCHESTRATOR_MODEL
+    thinking_level = "high" if is_orchestrator else "low"
+
+    # VALIDATED mode: enforces function-schema adherence and reduces malformed
+    # calls. Default AUTO mode lets the model decide text vs. tool freely, which
+    # contributes to "chat-only" stalls after successful actions.
+    tool_config = ToolConfig(
+        function_calling_config=FunctionCallingConfig(
+            mode=FunctionCallingConfigMode.VALIDATED,
+        )
+    )
 
     for _ in range(MAX_TOOL_ITERATIONS):
         system_instruction = build_system_instruction(session, latest_user_message)
@@ -784,7 +1006,8 @@ def run_agent_step(
             config=GenerateContentConfig(
                 system_instruction=system_instruction,
                 tools=ALL_TOOLS,
-                thinking_config=ThinkingConfig(thinking_level="low"),
+                tool_config=tool_config,
+                thinking_config=ThinkingConfig(thinking_level=thinking_level),
             ),
         )
         if record_usage:
@@ -826,6 +1049,12 @@ def run_agent_step(
         for call in function_calls:
             name = call.name
             args = dict(call.args) if call.args else {}
+            # Gemini 3 returns a unique id on every function_call. It's
+            # mandatory to echo this exact id back in the matching
+            # function_response so the model can map results to calls.
+            # Fall back to a generated uuid only if the model omitted one
+            # (older models).
+            call_id = getattr(call, "id", None) or str(uuid.uuid4())
 
             if name in CONVERSATIONAL_TOOL_NAMES:
                 # Server handles these in process.
@@ -834,17 +1063,27 @@ def run_agent_step(
                 )
                 if extra.get("awaiting_approval"):
                     awaiting_approval = True
+                    approval_scope = extra.get("approval_scope") or approval_scope
                     approval_todo_id = extra.get("approval_todo_id")
+                    approval_reason = extra.get("approval_reason") or approval_reason
                     approval_preview = extra.get("approval_preview") or approval_preview
+                if extra.get("awaiting_user"):
+                    awaiting_user = True
+                if extra.get("pending_clarify"):
+                    pending_clarify = extra["pending_clarify"]
+                if extra.get("pending_report"):
+                    pending_report = extra["pending_report"]
                 tool_responses.append(
-                    Part.from_function_response(name=name, response=result)
+                    _function_response_part(name, result, call_id)
                 )
             elif name in BROWSER_TOOL_NAMES:
                 # We stop the loop here: the client executes the action and the
                 # next /agent/step call will feed results back as function_response.
+                # The call_id propagated to the client must be Gemini's id, so
+                # the result Part can be mapped back to the original call.
                 pending_actions.append(
                     {
-                        "call_id": str(uuid.uuid4()),
+                        "call_id": call_id,
                         "name": name,
                         "args": args,
                     }
@@ -852,9 +1091,8 @@ def run_agent_step(
                 browser_batch_started = True
             else:
                 tool_responses.append(
-                    Part.from_function_response(
-                        name=name,
-                        response={"error": f"unknown tool {name}"},
+                    _function_response_part(
+                        name, {"error": f"unknown tool {name}"}, call_id
                     )
                 )
 
@@ -867,6 +1105,9 @@ def run_agent_step(
         if awaiting_approval:
             # approval pause — client will reply in a new step
             break
+        if awaiting_user:
+            # clarify or report — terminal pause, user replies in a new step
+            break
 
     # Persist contents back to the session.
     session.gemini_contents = [_content_to_dict(c) for c in contents]
@@ -877,8 +1118,12 @@ def run_agent_step(
         "chats": chats,
         "pending_actions": pending_actions,
         "awaiting_approval": awaiting_approval,
+        "approval_scope": approval_scope,
         "approval_todo_id": approval_todo_id,
+        "approval_reason": approval_reason,
         "approval_preview": approval_preview,
+        "pending_clarify": pending_clarify,
+        "pending_report": pending_report,
         "todo_plan": session.todo_plan.model_dump(mode="json"),
         "active_todo_id": session.active_todo_id,
         "status": session.status,
@@ -916,13 +1161,50 @@ def _handle_conversational_tool(
     if name == "clarify":
         question = (args.get("question") or "").strip()
         why = (args.get("why") or "").strip()
-        full = question if not why else f"{question}\n\n_(why: {why})_"
-        if full:
-            chats.append(full)
-            assistant_messages.append(
-                {"role": "assistant", "message_type": "chat", "content": full}
+        options_raw = args.get("options") or []
+        options = [str(o).strip() for o in options_raw if str(o).strip()]
+        if len(options) < 2:
+            # Hard rule: clarify requires real fork with ≥2 options. Reject and
+            # tell the model to either skip the question or provide options.
+            return (
+                {
+                    "ok": False,
+                    "error": (
+                        "clarify requires options=[≥2 distinct paths]. "
+                        "If there is no real fork, do not call clarify — just act. "
+                        "If you need pathway input, retry with at least 2 distinct options."
+                    ),
+                },
+                extras,
             )
-        return {"ok": True}, extras
+        # Build the user-facing message.
+        bullets = "\n".join(f"  • {o}" for o in options)
+        body = question
+        if why:
+            body += f"\n\n_(why: {why})_"
+        body += f"\n\n{bullets}"
+        chats.append(body)
+        assistant_messages.append(
+            {
+                "role": "assistant",
+                "message_type": "clarify",
+                "content": body,
+                # Structured payload so the UI can render clickable option chips.
+                "clarify": {
+                    "question": question,
+                    "why": why,
+                    "options": options,
+                },
+            }
+        )
+        # Pause for the user — clarify is a valid stop.
+        extras["awaiting_user"] = True
+        extras["pending_clarify"] = {
+            "question": question,
+            "why": why,
+            "options": options,
+        }
+        return {"ok": True, "options": options}, extras
 
     if name == "set_todo_plan":
         todos_in = args.get("todos") or []
@@ -951,28 +1233,96 @@ def _handle_conversational_tool(
         return {"ok": True, "count": len(todos)}, extras
 
     if name == "request_approval":
-        todo_id = str(args.get("todo_id") or "")
+        scope = str(args.get("scope") or "").strip().lower()
+        todo_id = str(args.get("todo_id") or "").strip()
+        reason = str(args.get("reason") or "").strip().lower()
         preview = (args.get("preview") or "").strip()
-        todo = _find_todo(session, todo_id)
-        if not todo:
-            return {"ok": False, "error": f"unknown todo {todo_id}"}, extras
-        session.active_todo_id = todo.id
-        session.awaiting_approval = True
-        extras["awaiting_approval"] = True
-        extras["approval_todo_id"] = todo.id
-        extras["approval_preview"] = preview or todo.description or todo.title
-        msg = f"⏸ Approve **{todo.title}**?"
-        if preview:
-            msg += f"\n\n{preview}"
-        chats.append(msg)
-        assistant_messages.append(
-            {
-                "role": "assistant",
-                "message_type": "gate",
-                "content": msg,
+
+        # Back-compat: an old-style call without scope but with todo_id is
+        # treated as scope="todo" — but it must come with a valid destructive
+        # reason, otherwise we reject and tell the model to either go scope=plan
+        # or remove the gate.
+        if not scope:
+            scope = "todo" if todo_id else "plan"
+
+        if scope == "plan":
+            # Plan-level approval — covers the whole non-destructive plan.
+            session.awaiting_approval = True
+            extras["awaiting_approval"] = True
+            extras["approval_scope"] = "plan"
+            extras["approval_todo_id"] = None
+            extras["approval_preview"] = (
+                preview
+                or "approve the plan and I'll run all non-destructive steps; "
+                "I'll only pause again for destructive actions or genuine forks."
+            )
+            todo_count = len(session.todo_plan.todos)
+            msg = f"⏸ Approve plan ({todo_count} todos)?"
+            if preview:
+                msg += f"\n\n{preview}"
+            chats.append(msg)
+            assistant_messages.append(
+                {
+                    "role": "assistant",
+                    "message_type": "gate",
+                    "content": msg,
+                    "gate": {"scope": "plan", "preview": preview},
+                }
+            )
+            return {"ok": True, "scope": "plan"}, extras
+
+        if scope == "todo":
+            # Destructive-action gate. Validate reason is in the whitelist.
+            DESTRUCTIVE = {
+                "sends_message",
+                "submits_payment",
+                "deletes_data",
+                "posts_publicly",
+                "external_write",
+                "irreversible_state_change",
             }
-        )
-        return {"ok": True, "todo_id": todo.id}, extras
+            if reason not in DESTRUCTIVE:
+                return (
+                    {
+                        "ok": False,
+                        "error": (
+                            f"request_approval(scope='todo') requires reason in {sorted(DESTRUCTIVE)}. "
+                            f"Got reason='{reason}'. If this todo is NOT destructive, do not pause — "
+                            "just execute it (the plan was already approved)."
+                        ),
+                    },
+                    extras,
+                )
+            todo = _find_todo(session, todo_id) if todo_id else None
+            if not todo:
+                return {"ok": False, "error": f"unknown todo {todo_id}"}, extras
+            session.active_todo_id = todo.id
+            session.awaiting_approval = True
+            extras["awaiting_approval"] = True
+            extras["approval_scope"] = "todo"
+            extras["approval_todo_id"] = todo.id
+            extras["approval_reason"] = reason
+            extras["approval_preview"] = preview or todo.description or todo.title
+            msg = f"⏸ Destructive action ({reason}) — approve **{todo.title}**?"
+            if preview:
+                msg += f"\n\n{preview}"
+            chats.append(msg)
+            assistant_messages.append(
+                {
+                    "role": "assistant",
+                    "message_type": "gate",
+                    "content": msg,
+                    "gate": {
+                        "scope": "todo",
+                        "todo_id": todo.id,
+                        "reason": reason,
+                        "preview": preview,
+                    },
+                }
+            )
+            return {"ok": True, "scope": "todo", "todo_id": todo.id, "reason": reason}, extras
+
+        return {"ok": False, "error": f"invalid scope='{scope}' — use 'plan' or 'todo'"}, extras
 
     if name == "update_todo":
         todo_id = str(args.get("todo_id") or "")
@@ -1024,36 +1374,112 @@ def _handle_conversational_tool(
         session.active_todo_id = next_todo.id if next_todo else None
         return {"ok": True, "next_todo_id": session.active_todo_id}, extras
 
-    if name == "save_playbook":
-        # The actual save endpoint is called by the client when the user clicks
-        # Save. Here we advertise intent, surface the proposed parameters, and
-        # flip status — the args (incl. generalized_inputs) are preserved in
-        # gemini_contents and the save endpoint pulls them out from there.
-        title = (args.get("title") or "").strip()
+    if name == "report":
+        # Terminal — the session's final summary. Builds a structured report
+        # the UI renders as a special bubble. Folds in save_playbook offer.
+        summary = (args.get("summary") or "").strip()
+        artifacts = args.get("artifacts") or []
+        surprises = [str(s).strip() for s in (args.get("surprises") or []) if str(s).strip()]
+        next_steps = (args.get("next_steps_for_user") or "").strip()
+        save_playbook = bool(args.get("save_playbook") or False)
+        playbook_title = (args.get("playbook_title") or "").strip()
         inputs = args.get("generalized_inputs") or []
-        msg = "💾 I think this is playbook-worthy. Hit **Save Playbook** when you're ready."
-        if title:
-            msg += f"\n\nProposed title: **{title}**"
-        if inputs:
+
+        # Build a markdown body for users who can't render the structured chip.
+        parts = []
+        if summary:
+            parts.append(summary)
+        if artifacts:
             lines = []
-            for inp in inputs:
-                if not isinstance(inp, dict):
+            for a in artifacts:
+                if not isinstance(a, dict):
                     continue
-                nm = str(inp.get("name") or "").strip()
-                desc = str(inp.get("description") or "").strip()
-                ex = str(inp.get("example_value") or "").strip()
+                nm = str(a.get("name") or "").strip()
+                url = str(a.get("url") or "").strip()
+                kind = str(a.get("kind") or "").strip()
                 if not nm:
                     continue
-                suffix = f" — e.g. `{ex}`" if ex else ""
-                lines.append(f"- **{nm}**: {desc}{suffix}")
+                tail = f" ({url})" if url else ""
+                head = f"{kind}: " if kind else ""
+                lines.append(f"- {head}{nm}{tail}")
             if lines:
-                msg += "\n\nParameters I'd expose for reruns:\n" + "\n".join(lines)
+                parts.append("**Artifacts:**\n" + "\n".join(lines))
+        if surprises:
+            parts.append("**Surprises:**\n" + "\n".join(f"- {s}" for s in surprises))
+        if next_steps:
+            parts.append(f"**Next:** {next_steps}")
+        if save_playbook:
+            sp_lines = ["💾 **Save as playbook?**"]
+            if playbook_title:
+                sp_lines.append(f"Title: **{playbook_title}**")
+            if inputs:
+                sp_lines.append("Parameters for reruns:")
+                for inp in inputs:
+                    if not isinstance(inp, dict):
+                        continue
+                    nm = str(inp.get("name") or "").strip()
+                    desc = str(inp.get("description") or "").strip()
+                    ex = str(inp.get("example_value") or "").strip()
+                    if not nm:
+                        continue
+                    suffix = f" — e.g. `{ex}`" if ex else ""
+                    sp_lines.append(f"- **{nm}**: {desc}{suffix}")
+            parts.append("\n".join(sp_lines))
+
+        msg = "\n\n".join(parts) if parts else "(report had no content)"
         chats.append(msg)
         assistant_messages.append(
-            {"role": "assistant", "message_type": "chat", "content": msg}
+            {
+                "role": "assistant",
+                "message_type": "report",
+                "content": msg,
+                "report": {
+                    "summary": summary,
+                    "artifacts": artifacts,
+                    "surprises": surprises,
+                    "next_steps_for_user": next_steps,
+                    "save_playbook": save_playbook,
+                    "playbook_title": playbook_title,
+                    "generalized_inputs": inputs,
+                },
+            }
         )
-        session.status = "ready_to_save"
-        return {"ok": True, "proposed_title": title, "input_count": len(inputs)}, extras
+        if save_playbook:
+            session.status = "ready_to_save"
+        else:
+            session.status = "complete"
+        # Report is terminal — pause the loop so the user sees the summary.
+        extras["awaiting_user"] = True
+        extras["pending_report"] = {
+            "summary": summary,
+            "artifacts": artifacts,
+            "surprises": surprises,
+            "next_steps_for_user": next_steps,
+            "save_playbook": save_playbook,
+            "playbook_title": playbook_title,
+            "generalized_inputs": inputs,
+        }
+        return {
+            "ok": True,
+            "summary": summary,
+            "save_playbook": save_playbook,
+        }, extras
+
+    # Back-compat shim: old prompts may still call save_playbook. Route into report.
+    if name == "save_playbook":
+        return _handle_conversational_tool(
+            session,
+            "report",
+            {
+                "summary": "playbook ready.",
+                "save_playbook": True,
+                "playbook_title": args.get("title") or "",
+                "generalized_inputs": args.get("generalized_inputs") or [],
+            },
+            chats,
+            assistant_messages,
+            system_messages,
+        )
 
     if name == "ask_advisor":
         question = (args.get("question") or "").strip()

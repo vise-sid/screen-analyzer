@@ -6,6 +6,15 @@
   "description": "AI browser agent that navigates and automates tasks for you — pixelfoxx.io",
   "permissions": ["activeTab", "sidePanel", "tabs", "tabGroups", "debugger", "cookies", "identity", "storage"],
   "host_permissions": ["<all_urls>"],
+  "oauth2": {
+    "client_id": "412083714557-qpevl23i9prs3s2fngs90j6eaccb3rg5.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/documents",
+      "https://www.googleapis.com/auth/presentations",
+      "https://www.googleapis.com/auth/drive.file"
+    ]
+  },
   "background": {
     "service_worker": "background.js"
   },

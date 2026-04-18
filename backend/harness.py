@@ -76,7 +76,7 @@ EvidenceType = Literal[
 GateType = Literal["auth", "captcha", "otp", "approval", "ambiguity", "handoff"]
 GateStatus = Literal["open", "resolved"]
 MessageRole = Literal["user", "assistant", "system"]
-MessageType = Literal["chat", "decision", "gate", "system"]
+MessageType = Literal["chat", "decision", "gate", "system", "clarify", "report"]
 TodoStatus = Literal["pending", "approved", "running", "done", "failed", "skipped"]
 
 

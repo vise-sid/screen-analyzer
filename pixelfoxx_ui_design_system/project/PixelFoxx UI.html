@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PixelFoxx — UI Design</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Silkscreen:wght@400;700&display=swap" rel="stylesheet" />
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="tokens.jsx"></script>
+<script type="text/babel" src="primitives.jsx"></script>
+<script type="text/babel" src="side-panel.jsx"></script>
+<script type="text/babel" src="popup.jsx"></script>
+<script type="text/babel" src="overlay-recorder.jsx"></script>
+<script type="text/babel" src="live-variants.jsx"></script>
+<script type="text/babel" src="tier1-screens.jsx"></script>
+<script type="text/babel" src="screens-v2.jsx"></script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  body { background: #1a1814; }
+
+  @keyframes fxPulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+  }
+
+  /* custom scrollbars inside panels */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #3A352D; }
+
+  /* Tweak panel */
+  #tweak-panel {
+    position: fixed; bottom: 20px; right: 20px;
+    background: #1C1916; border: 1px solid #4A4338;
+    padding: 16px; width: 220px;
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    color: #F4EFE6; font-size: 12px;
+    z-index: 9999; display: none;
+    clip-path: polygon(0 3px,3px 3px,3px 0,calc(100% - 3px) 0,calc(100% - 3px) 3px,100% 3px,100% calc(100% - 3px),calc(100% - 3px) calc(100% - 3px),calc(100% - 3px) 100%,3px 100%,3px calc(100% - 3px),0 calc(100% - 3px));
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+  #tweak-panel h3 {
+    font-size: 10px; letter-spacing: 0.6px;
+    color: #FFC83D; font-family: 'Silkscreen', monospace;
+    margin-bottom: 14px;
+  }
+  .tweak-row { margin-bottom: 12px; }
+  .tweak-label { font-size: 10px; color: #A89E8D; margin-bottom: 5px; letter-spacing: 0.3px; text-transform: uppercase; }
+  .tweak-row select, .tweak-row input[type=range] {
+    width: 100%; background: #14110E;
+    border: 1px solid #3A352D; color: #F4EFE6;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    padding: 5px 8px; cursor: pointer;
+  }
+  .tweak-row input[type=range] { padding: 2px; accent-color: #FF6A1A; }
+</style>
+
+<template id="__bundler_thumbnail">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80">
+    <rect width="120" height="80" fill="#14110E"/>
+    <rect x="20" y="15" width="35" height="50" rx="2" fill="#1C1916" stroke="#FF6A1A" stroke-width="1.5"/>
+    <rect x="62" y="25" width="38" height="30" rx="2" fill="#1C1916" stroke="#FFC83D" stroke-width="1"/>
+    <circle cx="37.5" cy="23" r="5" fill="#FF6A1A"/>
+    <text x="37.5" y="27" text-anchor="middle" font-size="6" fill="#14110E" font-family="monospace" font-weight="bold">F</text>
+  </svg>
+</template>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Tweak Panel -->
+<div id="tweak-panel">
+  <h3>TWEAKS</h3>
+  <div class="tweak-row">
+    <div class="tweak-label">Panel Tab</div>
+    <select id="tw-tab" onchange="applyTweaks()">
+      <option value="live">Live Run</option>
+      <option value="books">Playbooks</option>
+      <option value="hist">History</option>
+    </select>
+  </div>
+  <div class="tweak-row">
+    <div class="tweak-label">Accent Color</div>
+    <select id="tw-accent" onchange="applyTweaks()">
+      <option value="#FF6A1A">Fox Orange (default)</option>
+      <option value="#7FD46B">Hacker Green</option>
+      <option value="#4FB3D9">Electric Blue</option>
+      <option value="#FFC83D">Safety Yellow</option>
+    </select>
+  </div>
+  <div class="tweak-row">
+    <div class="tweak-label">Mascot Presence</div>
+    <select id="tw-mascot" onchange="applyTweaks()">
+      <option value="loud">Loud — everywhere</option>
+      <option value="normal">Normal — sidekick</option>
+      <option value="minimal">Minimal — logo only</option>
+    </select>
+  </div>
+  <div class="tweak-row">
+    <div class="tweak-label">UI Density</div>
+    <select id="tw-density" onchange="applyTweaks()">
+      <option value="comfortable">Comfortable</option>
+      <option value="compact">Compact</option>
+    </select>
+  </div>
+</div>
+
+<script>
+window.addEventListener('message', e => {
+  if (e.data?.type === '__activate_edit_mode')   document.getElementById('tweak-panel').style.display = 'block';
+  if (e.data?.type === '__deactivate_edit_mode') document.getElementById('tweak-panel').style.display = 'none';
+});
+window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+
+function applyTweaks() {
+  const tab    = document.getElementById('tw-tab')?.value || 'live';
+  const accent = document.getElementById('tw-accent')?.value || '#FF6A1A';
+  // Trigger React re-render by updating global state (we expose a setter)
+  if (window.__setTweaks) window.__setTweaks({ tab, accent });
+  window.parent.postMessage({ type: '__edit_mode_set_keys', edits: { tab, accent } }, '*');
+}
+</script>
+
+<script type="text/babel">
+const TWEAK_DEFAULS = /*EDITMODE-BEGIN*/{
+  "tab": "live",
+  "accent": "#FF6A1A"
+}/*EDITMODE-END*/;
+
+const App = () => {
+  const [tweaks, setTweaks] = React.useState(TWEAK_DEFAULS);
+  React.useEffect(() => { window.__setTweaks = (t) => setTweaks(prev => ({ ...prev, ...t })); }, []);
+
+  return (
+    <DesignCanvas>
+      {/* ── Section 1: Side Panel ──────────────────────────── */}
+      <DCSection
+        title="Side Panel — Main Extension UI"
+        subtitle="Lives in Chrome's right-side panel · 400×740 · 3 tabs"
+      >
+        <DCArtboard label="Live Run — agent executing" width={400} height={740} style={{ background: '#14110E' }}>
+          <SidePanel initialTab="live" runState="running" />
+        </DCArtboard>
+
+        <DCArtboard label="Playbook Library — browse & launch" width={400} height={740} style={{ background: '#14110E' }}>
+          <SidePanel initialTab="books" runState="idle" />
+        </DCArtboard>
+
+        <DCArtboard label="Run History — stats & logs" width={400} height={740} style={{ background: '#14110E' }}>
+          <SidePanel initialTab="hist" runState="idle" />
+        </DCArtboard>
+      </DCSection>
+
+      {/* ── Section 2: Live View Modes ─────────────────────── */}
+      <DCSection
+        title="Live Session — View Modes"
+        subtitle="Same collaborative session, different focus views · switch via the chat/steps/log/focus strip"
+      >
+        <DCArtboard label="Steps view — plan + progress ring" width={400} height={740} style={{ background: '#14110E' }}>
+          <LiveRunSteps />
+        </DCArtboard>
+
+        <DCArtboard label="Log view — raw agent stream" width={400} height={740} style={{ background: '#14110E' }}>
+          <LiveRunLog />
+        </DCArtboard>
+
+        <DCArtboard label="Focus view — hero status + mascot moment" width={400} height={740} style={{ background: '#14110E' }}>
+          <LiveRunFocus />
+        </DCArtboard>
+      </DCSection>
+
+      {/* ── Section 3: Popup + Overlay ─────────────────────── */}
+      <DCSection
+        title="Popup + In-Page Overlay HUD"
+        subtitle="Toolbar popup · 320×420 — and the live agent HUD pinned in-page bottom-right"
+      >
+        <DCArtboard label="Toolbar Popup" width={320} height={420} style={{ background: '#14110E' }}>
+          <Popup />
+        </DCArtboard>
+
+        <DCArtboard label="In-Page Agent HUD (expanded)" width={320} height={240} style={{ background: '#2a2820', display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-end', padding: 16 }}>
+          {/* simulated tab bg */}
+          <div style={{ position: 'absolute', inset: 0, padding: 16, opacity: 0.15 }}>
+            <div style={{ width: '100%', height: 20, background: '#4FB3D9', marginBottom: 8 }} />
+            {[80,60,90,50,70].map((w,i) => (
+              <div key={i} style={{ width: `${w}%`, height: 10, background: '#F4EFE6', marginBottom: 6 }} />
+            ))}
+          </div>
+          <OverlayHUD />
+        </DCArtboard>
+      </DCSection>
+
+      {/* ── Section 3: Recorder ───────────────────────────── */}
+      <DCSection
+        title="Playbook Recorder"
+        subtitle="User browses normally, Foxx captures every interaction into a replayable step list"
+      >
+        <DCArtboard label="Recording in progress" width={400} height={740} style={{ background: '#14110E' }}>
+          <Recorder />
+        </DCArtboard>
+
+        {/* Brand moment card */}
+        <DCArtboard label="Mascot reference — asset" width={260} height={380} style={{ background: '#14110E', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 0 }}>
+          <div style={{
+            fontFamily: "'Silkscreen', monospace",
+            fontSize: 22, letterSpacing: 1,
+            color: '#F4EFE6', marginBottom: 4, lineHeight: 1,
+          }}>
+            PIXEL<span style={{ color: '#FF6A1A' }}>FOXX</span>
+          </div>
+          <div style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 10, color: '#6B6357', letterSpacing: 0.5,
+            marginBottom: 24,
+          }}>AI BROWSER AUTOMATION</div>
+          <img
+            src="assets/pixelfoxx.jpg"
+            alt="PixelFoxx"
+            style={{ width: 180, height: 'auto', imageRendering: 'pixelated' }}
+          />
+          <div style={{
+            marginTop: 20,
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 10, color: '#4A4338', textAlign: 'center', lineHeight: 1.6,
+          }}>
+            #FF6A1A — Orange<br/>
+            #FFC83D — Yellow<br/>
+            #4FB3D9 — Blue<br/>
+            #14110E — Dark
+          </div>
+        </DCArtboard>
+      </DCSection>
+      {/* ── Section 5: New Flows ────────────────────────── */}
+      <DCSection
+        title="Onboarding — First Run"
+        subtitle="3-step intro · meet Foxx, grant permissions, pick a starter playbook"
+      >
+        <DCArtboard label="Step 1 — meet foxx" width={400} height={740} style={{ background: '#14110E' }}>
+          <Onboarding step={1} />
+        </DCArtboard>
+        <DCArtboard label="Step 2 — permissions" width={400} height={740} style={{ background: '#14110E' }}>
+          <Onboarding step={2} />
+        </DCArtboard>
+        <DCArtboard label="Step 3a — foxx peeks at your active tab" width={400} height={740} style={{ background: '#14110E' }}>
+          <Onboarding step="3a" />
+        </DCArtboard>
+        <DCArtboard label="Step 3b — the crime scene reveal" width={400} height={740} style={{ background: '#14110E' }}>
+          <Onboarding step="3b" />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection
+        title="Playbook Editor"
+        subtitle="Open a play · reorder, parameterize with {{variables}}, branch, version"
+      >
+        <DCArtboard label="Playbook detail — Job Hunt" width={400} height={740} style={{ background: '#14110E' }}>
+          <PlaybookEditor />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection
+        title="Run Detail — Replay"
+        subtitle="Click a History row · see every moment with a screenshot, timestamp, and Foxx's reasoning"
+      >
+        <DCArtboard label="Completed run — 6 moments" width={400} height={740} style={{ background: '#14110E' }}>
+          <RunDetail />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection
+        title="Human-in-the-Loop Takeover"
+        subtitle="Foxx hit a 2FA, captcha, or decision point · modal asks for help without killing the run"
+      >
+        <DCArtboard label="2FA handoff modal" width={400} height={740} style={{ background: '#14110E' }}>
+          <TakeoverModal />
+        </DCArtboard>
+      </DCSection>
+
+      {/* ── Section 9: Settings + Permissions ────────────── */}
+      <DCSection
+        title="Settings & Identity"
+        subtitle="Signed-in user lives here · profile, preferences, shortcuts, site access, danger zone"
+      >
+        <DCArtboard label="Settings — profile + preferences" width={400} height={740} style={{ background: '#14110E' }}>
+          <SettingsScreen />
+        </DCArtboard>
+
+        <DCArtboard label="Site Access — trusted domains &amp; notifications" width={400} height={740} style={{ background: '#14110E' }}>
+          <PermissionsScreen />
+        </DCArtboard>
+      </DCSection>
+
+      {/* ── Section 10: Error States ────────────────── */}
+      <DCSection
+        title="Error &amp; Recovery States"
+        subtitle="When things go sideways · Foxx owns the failure, stays in character, gives a way out"
+      >
+        <DCArtboard label="Offline — lost internet mid-run" width={400} height={740} style={{ background: '#14110E' }}>
+          <ErrorOffline />
+        </DCArtboard>
+
+        <DCArtboard label="Stuck — can't find the element" width={400} height={740} style={{ background: '#14110E' }}>
+          <ErrorStuck />
+        </DCArtboard>
+
+        <DCArtboard label="Rate limited — site said slow down" width={400} height={740} style={{ background: '#14110E' }}>
+          <ErrorRateLimit />
+        </DCArtboard>
+
+        <DCArtboard label="Page changed — DOM drift since recording" width={400} height={740} style={{ background: '#14110E' }}>
+          <ErrorPageChanged />
+        </DCArtboard>
+
+        <DCArtboard label="Fatal — agent crashed mid-run" width={400} height={740} style={{ background: '#14110E' }}>
+          <ErrorFatal />
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

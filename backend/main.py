@@ -239,24 +239,38 @@ def _build_builder_session_envelope(session_id: str, user: AuthenticatedUser) ->
 
 
 def _extract_save_proposal(session: SessionHarness) -> tuple[str | None, list[PlaybookInput]]:
-    """Pull the most recent save_playbook tool-call args out of gemini_contents.
+    """Pull the most recent save_playbook / report(save_playbook=true) args
+    out of gemini_contents.
 
-    The agent emits save_playbook(title=..., generalized_inputs=[...]) and the
-    tool-call is persisted inside session.gemini_contents. We scan from the end
-    to find the latest invocation and extract its args.
+    Accepts both the legacy `save_playbook(title, generalized_inputs)` tool
+    call and the v3 `report(save_playbook=true, playbook_title, generalized_inputs)`
+    tool call. Scans from the end, takes the most recent match.
     """
     title: str | None = None
     inputs: list[PlaybookInput] = []
     for content in reversed(session.gemini_contents):
         for part in content.get("parts", []) or []:
             fc = part.get("function_call")
-            if not fc or fc.get("name") != "save_playbook":
+            if not fc:
                 continue
+            fname = fc.get("name")
             args = fc.get("args") or {}
-            t = args.get("title")
-            if isinstance(t, str) and t.strip():
-                title = t.strip()
-            raw_inputs = args.get("generalized_inputs") or []
+            # v3: report(save_playbook=true, playbook_title, generalized_inputs)
+            if fname == "report":
+                if not args.get("save_playbook"):
+                    continue
+                t = args.get("playbook_title") or ""
+                if isinstance(t, str) and t.strip():
+                    title = t.strip()
+                raw_inputs = args.get("generalized_inputs") or []
+            # Legacy: save_playbook(title, generalized_inputs)
+            elif fname == "save_playbook":
+                t = args.get("title")
+                if isinstance(t, str) and t.strip():
+                    title = t.strip()
+                raw_inputs = args.get("generalized_inputs") or []
+            else:
+                continue
             if isinstance(raw_inputs, list):
                 for raw in raw_inputs:
                     if not isinstance(raw, dict):
@@ -311,8 +325,12 @@ class AgentStepEnvelope(BaseModel):
     chats: list[str] = Field(default_factory=list)
     pending_actions: list[dict] = Field(default_factory=list)
     awaiting_approval: bool = False
+    approval_scope: str | None = None  # "plan" | "todo"
     approval_todo_id: str | None = None
+    approval_reason: str | None = None  # destructive class for scope="todo"
     approval_preview: str | None = None
+    pending_clarify: dict | None = None   # {question, why, options}
+    pending_report: dict | None = None    # {summary, artifacts, surprises, next_steps_for_user, save_playbook, ...}
 
 
 def _agent_record_usage_factory(user_sub: str, session_id: str):
@@ -459,8 +477,12 @@ async def agent_step(
         chats=result.get("chats", []),
         pending_actions=result.get("pending_actions", []),
         awaiting_approval=bool(result.get("awaiting_approval")),
+        approval_scope=result.get("approval_scope"),
         approval_todo_id=result.get("approval_todo_id"),
+        approval_reason=result.get("approval_reason"),
         approval_preview=result.get("approval_preview"),
+        pending_clarify=result.get("pending_clarify"),
+        pending_report=result.get("pending_report"),
     )
 
 
@@ -784,6 +806,13 @@ class SheetsReadRequest(BaseModel):
     token: str
 
 
+def _workspace_http_status(e: Exception) -> int:
+    msg = str(e).lower()
+    if any(k in msg for k in ("401", "403", "unauthorized", "forbidden", "invalid_grant", "token", "auth")):
+        return 401
+    return 500
+
+
 @app.post("/sheets/create")
 async def sheets_create(req: SheetsCreateRequest):
     try:
@@ -791,7 +820,7 @@ async def sheets_create(req: SheetsCreateRequest):
         sh = gc.create(req.title)
         return {"spreadsheet_id": sh.id, "url": sh.url, "title": sh.title}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sheets create failed: {e}")
+        raise HTTPException(status_code=_workspace_http_status(e), detail=f"Sheets create failed: {e}")
 
 
 @app.post("/sheets/write")
@@ -809,7 +838,7 @@ async def sheets_write(req: SheetsWriteRequest):
             "rows_written": len(req.values),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sheets write failed: {e}")
+        raise HTTPException(status_code=_workspace_http_status(e), detail=f"Sheets write failed: {e}")
 
 
 @app.post("/sheets/read")
@@ -821,7 +850,7 @@ async def sheets_read(req: SheetsReadRequest):
         values = worksheet.get(req.range)
         return {"values": values, "rows": len(values)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Sheets read failed: {e}")
+        raise HTTPException(status_code=_workspace_http_status(e), detail=f"Sheets read failed: {e}")
 
 
 DOCS_API = "https://docs.googleapis.com"

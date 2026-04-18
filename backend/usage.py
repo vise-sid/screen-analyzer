@@ -33,7 +33,7 @@ PRICING: dict[str, dict[str, float]] = {
 # Daily spend ceilings per tier, in USD. Enforced before each LLM call.
 # Override via env for testing. Tier 'admin' has no cap.
 DAILY_LIMITS_USD: dict[str, float] = {
-    "free":    float(os.getenv("DAILY_LIMIT_FREE_USD", "1.00")),
+    "free":    float(os.getenv("DAILY_LIMIT_FREE_USD", "100.00")),
     "pro":     float(os.getenv("DAILY_LIMIT_PRO_USD",  "25.00")),
     "team":    float(os.getenv("DAILY_LIMIT_TEAM_USD", "100.00")),
 }

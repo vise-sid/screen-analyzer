@@ -32,7 +32,6 @@ const todoStrip = document.getElementById("todoStrip");
 const todoStripList = document.getElementById("todoStripList");
 const todoStripCount = document.getElementById("todoStripCount");
 
-const activityBar = document.getElementById("activityBar");
 const saveBanner = document.getElementById("saveBanner");
 const saveBtn = document.getElementById("saveBtn");
 
@@ -45,14 +44,6 @@ let sessionId = null;
 let running = false;
 let currentAbort = null;
 let renderedMessageIds = new Set();
-let lastAgentActivityAt = null; // ms timestamp of last successful postAgentStep
-let agentStuckFlag = false;     // true when driveAgentStep exits via unhandled throw
-let lastActionFailed = false;   // true when the most recent action batch had ≥1 failure
-let lastSessionSnapshot = null; // { activeTodoId, todos: [...], status } from last step
-// Tracks optimistic user bubbles (content → count). When a matching
-// server-persisted user message arrives from /agent/step, we consume one
-// entry and skip re-rendering so the UI doesn't double.
-const pendingOptimisticUser = new Map();
 
 // ── Views ───────────────────────────────────────────────────
 function showLanding() {
@@ -80,7 +71,6 @@ function showPlaybooks() {
 function goHome() {
   sessionId = null;
   renderedMessageIds = new Set();
-  pendingOptimisticUser.clear();
   chatThread.innerHTML = "";
   setTodoPlan({ todos: [] }, null);
   pendingApprovalBubble = null;
@@ -106,10 +96,7 @@ function addThinking() {
   const el = document.createElement("div");
   el.className = "chat-bubble thinking";
   el.dataset.role = "thinking";
-  el.innerHTML =
-    '<div class="foxx-thinking-dot" style="animation-delay:0ms"></div>' +
-    '<div class="foxx-thinking-dot" style="animation-delay:160ms"></div>' +
-    '<div class="foxx-thinking-dot" style="animation-delay:320ms"></div>';
+  el.textContent = "thinking";
   chatThread.appendChild(el);
   chatThread.scrollTop = chatThread.scrollHeight;
   return el;
@@ -121,72 +108,7 @@ function removeThinking() {
 
 function addActionBubble(actionName, args) {
   const summary = describeAction(actionName, args);
-  const tag = getActionTag(actionName);
-  const el = document.createElement("div");
-  el.className = "chat-bubble action running";
-  el.dataset.actionName = actionName;
-  el.innerHTML =
-    `<span class="action-tag" style="background:${tag.color}">${escapeHtml(tag.label)}</span>` +
-    `<span class="action-body">${escapeHtml(summary)}</span>` +
-    `<span class="action-status">…</span>`;
-  chatThread.appendChild(el);
-  chatThread.scrollTop = chatThread.scrollHeight;
-  return el;
-}
-
-function markActionBubble(bubble, outcome, response) {
-  if (!bubble) return;
-  bubble.classList.remove("running");
-  bubble.classList.add(outcome === "ok" ? "ok" : "fail");
-  const status = bubble.querySelector(".action-status");
-  if (status) status.textContent = outcome === "ok" ? "✓" : "✗";
-  if (outcome !== "ok" && response && response.error) {
-    const err = document.createElement("span");
-    err.className = "action-error";
-    err.textContent = String(response.error).slice(0, 160);
-    bubble.appendChild(err);
-  }
-}
-
-// Tool-name → tag-chip {label, color}. See claude_design/CLAUDE.md for palette.
-function getActionTag(name) {
-  const n = (name || "").toLowerCase();
-  if (n === "navigate" || n === "back" || n === "forward" || n === "probe_site")
-    return { label: "NAV", color: "#4FB3D9" };
-  if (n.startsWith("click") || n === "dismiss_popup")
-    return { label: "CLK", color: "#FF6A1A" };
-  if (n === "focus_and_type" || n === "type" || n === "clear_and_type" || n === "focus")
-    return { label: "IN", color: "#FFC83D" };
-  if (n.startsWith("scrape") || n.startsWith("extract"))
-    return { label: "SCRP", color: "#FFC83D" };
-  if (n === "verify")
-    return { label: "VFY", color: "#7FD46B" };
-  if (n === "wait")
-    return { label: "WAIT", color: "#4A4338" };
-  if (n.startsWith("key"))
-    return { label: "KEY", color: "#6B6357" };
-  if (n === "scroll")
-    return { label: "SCR", color: "#6B6357" };
-  if (n.endsWith("_tab") || n === "list_tabs" || n === "switch_tab" || n === "new_tab" || n === "close_tab")
-    return { label: "TAB", color: "#4FB3D9" };
-  if (n.startsWith("sheets") || n.startsWith("docs") || n.startsWith("slides") || n === "fill_cells")
-    return { label: "GOOG", color: "#4FB3D9" };
-  if (n === "screenshot")
-    return { label: "CAP", color: "#6B6357" };
-  if (n === "stealth_solve" || n === "click_captcha")
-    return { label: "BOT", color: "#FF5A4E" };
-  if (n === "google_search")
-    return { label: "GOOG", color: "#4FB3D9" };
-  return { label: "ACT", color: "#6B6357" };
-}
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+  return addBubble("assistant", summary, { cls: "action" });
 }
 
 function describeAction(name, args = {}) {
@@ -270,31 +192,18 @@ function setTodoPlan(plan, activeTodoId) {
 }
 
 // ── Approval flow ───────────────────────────────────────────
-// Two scopes: "plan" (one-time, after set_todo_plan) and "todo" (only for
-// destructive actions, with a reason from the whitelist).
+// An approval is an inline chat bubble carrying Pixel's own preview text
+// plus Go-ahead / Hold-on buttons. No modal, no popup.
 let pendingApprovalBubble = null;
 
-function addApprovalBubble({ scope, todoId, reason, previewText }) {
+function addApprovalBubble(todoId, previewText) {
   const bubble = document.createElement("div");
-  bubble.className = `chat-bubble approval approval-${scope || "todo"}`;
+  bubble.className = "chat-bubble approval";
   bubble.dataset.todoId = todoId || "";
-  bubble.dataset.scope = scope || "todo";
-
-  // Header — different visual for plan vs destructive todo
-  const header = document.createElement("div");
-  header.className = "approval-header";
-  if (scope === "plan") {
-    header.textContent = "▶ approve plan";
-  } else if (reason) {
-    header.textContent = `⚠ destructive: ${reason.replace(/_/g, " ")}`;
-  } else {
-    header.textContent = "approve";
-  }
-  bubble.appendChild(header);
 
   const text = document.createElement("div");
   text.className = "approval-text";
-  text.textContent = previewText || "ready when you are.";
+  text.textContent = previewText || "Ready when you are.";
   bubble.appendChild(text);
 
   const actions = document.createElement("div");
@@ -303,22 +212,22 @@ function addApprovalBubble({ scope, todoId, reason, previewText }) {
   const go = document.createElement("button");
   go.className = "chat-approve";
   go.type = "button";
-  go.textContent = scope === "plan" ? "approve plan, run it" : "go ahead";
+  go.textContent = "Go ahead";
 
   const hold = document.createElement("button");
   hold.className = "chat-reject";
   hold.type = "button";
-  hold.textContent = "hold on…";
+  hold.textContent = "Hold on…";
 
   go.addEventListener("click", () => {
     resolveApprovalBubble(bubble, "approved");
-    approveCurrent({ scope, todoId }).catch((e) =>
+    approveCurrentTodo(todoId).catch((e) =>
       addBubble("assistant", e.message, { cls: "error" })
     );
   });
   hold.addEventListener("click", () => {
     resolveApprovalBubble(bubble, "rejected");
-    rejectCurrent({ scope, todoId }).catch((e) =>
+    rejectCurrentTodo().catch((e) =>
       addBubble("assistant", e.message, { cls: "error" })
     );
   });
@@ -342,173 +251,9 @@ function resolveApprovalBubble(bubble, outcome) {
   if (existing) existing.remove();
   const label = document.createElement("div");
   label.className = `approval-resolved ${outcome}`;
-  label.textContent = outcome === "approved" ? "✓ approved" : "✗ held";
+  label.textContent = outcome === "approved" ? "✓ Approved" : "✗ Held";
   bubble.appendChild(label);
   if (pendingApprovalBubble === bubble) pendingApprovalBubble = null;
-}
-
-// ── Clarify flow ────────────────────────────────────────────
-// Rendered as a bubble with ≥2 clickable option chips. Clicking one
-// sends the chosen option back as the next user message.
-let pendingClarifyBubble = null;
-
-function addClarifyBubble({ question, why, options }) {
-  const bubble = document.createElement("div");
-  bubble.className = "chat-bubble clarify";
-
-  const header = document.createElement("div");
-  header.className = "clarify-header";
-  header.textContent = "❓ pick a path";
-  bubble.appendChild(header);
-
-  const q = document.createElement("div");
-  q.className = "clarify-question";
-  q.textContent = question || "which way?";
-  bubble.appendChild(q);
-
-  if (why) {
-    const w = document.createElement("div");
-    w.className = "clarify-why";
-    w.textContent = `why: ${why}`;
-    bubble.appendChild(w);
-  }
-
-  const optsEl = document.createElement("div");
-  optsEl.className = "clarify-options";
-  (options || []).forEach((opt) => {
-    const btn = document.createElement("button");
-    btn.className = "clarify-option";
-    btn.type = "button";
-    btn.textContent = opt;
-    btn.addEventListener("click", () => {
-      resolveClarifyBubble(bubble, opt);
-      sendClarifyChoice(opt).catch((e) =>
-        addBubble("assistant", e.message, { cls: "error" })
-      );
-    });
-    optsEl.appendChild(btn);
-  });
-  bubble.appendChild(optsEl);
-
-  chatThread.appendChild(bubble);
-  chatThread.scrollTop = chatThread.scrollHeight;
-  pendingClarifyBubble = bubble;
-  return bubble;
-}
-
-function resolveClarifyBubble(bubble, chosen) {
-  if (!bubble) return;
-  bubble.querySelectorAll("button").forEach((b) => (b.disabled = true));
-  const label = document.createElement("div");
-  label.className = "clarify-resolved";
-  label.textContent = `→ ${chosen}`;
-  bubble.appendChild(label);
-  if (pendingClarifyBubble === bubble) pendingClarifyBubble = null;
-}
-
-async function sendClarifyChoice(chosen) {
-  if (running) return;
-  setRunning(true);
-  try {
-    await driveAgentStep({ user_message: chosen, action_results: [] });
-  } finally {
-    setRunning(false);
-  }
-}
-
-// ── Report flow ─────────────────────────────────────────────
-// Terminal bubble shown at end of session with summary, artifacts, etc.
-// If save_playbook=true, includes a Save button.
-function addReportBubble(report) {
-  const bubble = document.createElement("div");
-  bubble.className = "chat-bubble report";
-
-  const header = document.createElement("div");
-  header.className = "report-header";
-  header.textContent = "✓ session complete";
-  bubble.appendChild(header);
-
-  if (report.summary) {
-    const s = document.createElement("div");
-    s.className = "report-summary";
-    s.textContent = report.summary;
-    bubble.appendChild(s);
-  }
-
-  if (report.artifacts && report.artifacts.length) {
-    const artsEl = document.createElement("div");
-    artsEl.className = "report-artifacts";
-    const title = document.createElement("div");
-    title.className = "report-section-title";
-    title.textContent = "artifacts";
-    artsEl.appendChild(title);
-    report.artifacts.forEach((a) => {
-      const row = document.createElement("div");
-      row.className = "report-artifact";
-      const label = a.kind ? `${a.kind}: ${a.name}` : a.name;
-      if (a.url) {
-        const link = document.createElement("a");
-        link.href = a.url;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-        link.textContent = label;
-        row.appendChild(link);
-      } else {
-        row.textContent = label;
-      }
-      artsEl.appendChild(row);
-    });
-    bubble.appendChild(artsEl);
-  }
-
-  if (report.surprises && report.surprises.length) {
-    const sEl = document.createElement("div");
-    sEl.className = "report-surprises";
-    const title = document.createElement("div");
-    title.className = "report-section-title";
-    title.textContent = "surprises";
-    sEl.appendChild(title);
-    report.surprises.forEach((s) => {
-      const row = document.createElement("div");
-      row.className = "report-surprise";
-      row.textContent = "• " + s;
-      sEl.appendChild(row);
-    });
-    bubble.appendChild(sEl);
-  }
-
-  if (report.next_steps_for_user) {
-    const n = document.createElement("div");
-    n.className = "report-next";
-    n.textContent = `next: ${report.next_steps_for_user}`;
-    bubble.appendChild(n);
-  }
-
-  if (report.save_playbook) {
-    const saveBox = document.createElement("div");
-    saveBox.className = "report-save";
-    const btn = document.createElement("button");
-    btn.className = "report-save-btn";
-    btn.type = "button";
-    btn.textContent = "💾 save as playbook";
-    btn.addEventListener("click", () => {
-      showSaveBanner();
-      btn.disabled = true;
-      btn.textContent = "✓ save dialog opened";
-    });
-    saveBox.appendChild(btn);
-    if (report.playbook_title) {
-      const title = document.createElement("div");
-      title.className = "report-save-title";
-      title.textContent = `suggested title: ${report.playbook_title}`;
-      saveBox.appendChild(title);
-    }
-    bubble.appendChild(saveBox);
-  }
-
-  chatThread.appendChild(bubble);
-  chatThread.scrollTop = chatThread.scrollHeight;
-  return bubble;
 }
 
 // ── Save banner ─────────────────────────────────────────────
@@ -526,13 +271,6 @@ function renderMessages(messages) {
     if (renderedMessageIds.has(m.id)) continue;
     renderedMessageIds.add(m.id);
     if (m.role === "user") {
-      // If we already showed this content optimistically, consume that entry
-      // and don't double-render.
-      const count = pendingOptimisticUser.get(m.content) || 0;
-      if (count > 0) {
-        pendingOptimisticUser.set(m.content, count - 1);
-        continue;
-      }
       addBubble("user", m.content);
     } else if (m.role === "assistant" && m.message_type === "chat") {
       addBubble("assistant", m.content);
@@ -550,7 +288,6 @@ function setRunning(state) {
   sendBtn?.classList.toggle("hidden", state);
   stopBtn?.classList.toggle("hidden", !state);
   taskInput.disabled = state;
-  activityBar?.classList.toggle("hidden", !state);
 }
 
 // ── Session lifecycle ───────────────────────────────────────
@@ -579,24 +316,8 @@ async function postAgentStep(payload) {
   return resp.json();
 }
 
-// Build a lowercase greeting in Foxx's voice, using the signed-in first name
-// (falls back to "partner" pre-auth).
-function pixelFoxxGreeting() {
-  const firstName = (userName?.textContent || "partner").trim().toLowerCase() || "partner";
-  return `hey there, ${firstName}. paws on the keyboard, ready to work. what are we building today?`;
-}
-
-function addSessionDivider() {
-  const now = new Date();
-  const time = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-  const el = document.createElement("div");
-  el.className = "session-divider";
-  el.innerHTML =
-    '<div class="session-divider-line"></div>' +
-    `<div class="session-divider-label">SESSION STARTED · ${time}</div>` +
-    '<div class="session-divider-line"></div>';
-  chatThread.appendChild(el);
-}
+const PIXEL_FOXX_GREETING =
+  "Hey there, partner. Pixel Foxx at your service — paws on the keyboard, ready to work. What are we building today?";
 
 async function startSession() {
   if (running) return;
@@ -606,7 +327,6 @@ async function startSession() {
   hideSaveBanner();
   chatThread.innerHTML = "";
   renderedMessageIds = new Set();
-  addSessionDivider();
 
   setRunning(true);
   try {
@@ -618,9 +338,9 @@ async function startSession() {
     sessionId = envelope.session.session_id;
     renderMessages(envelope.messages || []);
     setTodoPlan(envelope.session.todo_plan, envelope.session.active_todo_id);
-    addBubble("assistant", pixelFoxxGreeting());
+    addBubble("assistant", PIXEL_FOXX_GREETING);
   } catch (err) {
-    addBubble("assistant", `couldn't start a session: ${err.message}`, { cls: "error" });
+    addBubble("assistant", `Couldn't start a session: ${err.message}`, { cls: "error" });
   } finally {
     setRunning(false);
   }
@@ -642,7 +362,7 @@ async function sendMessage() {
       setTodoPlan(envelope.session.todo_plan, envelope.session.active_todo_id);
       await driveAgentStep({ user_message: null, action_results: [] });
     } catch (err) {
-      addBubble("assistant", `couldn't start a session: ${err.message}`, { cls: "error" });
+      addBubble("assistant", `Couldn't start a session: ${err.message}`, { cls: "error" });
     } finally {
       setRunning(false);
     }
@@ -650,7 +370,6 @@ async function sendMessage() {
   }
 
   addBubble("user", text);
-  pendingOptimisticUser.set(text, (pendingOptimisticUser.get(text) || 0) + 1);
   // Typing a fresh message implicitly resolves any open approval bubble.
   if (pendingApprovalBubble) resolveApprovalBubble(pendingApprovalBubble, "rejected");
   setRunning(true);
@@ -663,32 +382,27 @@ async function sendMessage() {
   }
 }
 
-async function approveCurrent({ scope, todoId } = {}) {
+async function approveCurrentTodo(todoId) {
   if (running) return;
   setRunning(true);
   try {
-    let note;
-    if (scope === "plan") {
-      note = "approved. run the whole plan, no per-step checks unless something is destructive.";
-    } else if (todoId) {
-      note = `approved. go ahead with todo ${todoId}.`;
-    } else {
-      note = "approved. go ahead.";
-    }
+    const note = todoId
+      ? `Approved. Go ahead with todo ${todoId}.`
+      : "Approved. Go ahead.";
     await driveAgentStep({ user_message: note, action_results: [] });
   } finally {
     setRunning(false);
   }
 }
 
-async function rejectCurrent({ scope, todoId } = {}) {
+async function rejectCurrentTodo() {
   if (running) return;
   setRunning(true);
   try {
-    const note = scope === "plan"
-      ? "hold the plan — let's reshape it. ask me what to change."
-      : "hold on — don't run that yet. reconsider or ask me.";
-    await driveAgentStep({ user_message: note, action_results: [] });
+    await driveAgentStep({
+      user_message: "Hold on — don't run that yet. Reconsider or ask me.",
+      action_results: [],
+    });
   } finally {
     setRunning(false);
   }
@@ -697,187 +411,63 @@ async function rejectCurrent({ scope, todoId } = {}) {
 // ── Main agent-step driver ──────────────────────────────────
 async function driveAgentStep(firstPayload) {
   let payload = firstPayload;
-  // A single thinking indicator is kept alive across the entire loop — agent
-  // call AND action dispatch — so the UI never goes silent during the
-  // ~5-20s it takes CDP to screenshot / probe / scrape. We move it to the
-  // bottom of the thread after each new bubble so it always trails the work.
-  let thinking = addThinking();
-
-  const bumpThinking = () => {
-    // Re-append the same node to push it below any newly added bubble.
-    if (thinking && thinking.parentNode) {
-      thinking.parentNode.appendChild(thinking);
-      chatThread.scrollTop = chatThread.scrollHeight;
+  for (let iter = 0; iter < MAX_ACTION_ITERATIONS; iter++) {
+    const thinking = addThinking();
+    let result;
+    try {
+      result = await postAgentStep(payload);
+    } finally {
+      thinking.remove();
     }
-  };
 
-  agentStuckFlag = false;
-  lastActionFailed = false;
-  try {
-    for (let iter = 0; iter < MAX_ACTION_ITERATIONS; iter++) {
-      const result = await postAgentStep(payload);
-      lastAgentActivityAt = Date.now();
-      lastSessionSnapshot = {
-        activeTodoId: result.session?.active_todo_id || null,
-        todos: result.session?.todo_plan?.todos || [],
-        status: result.session?.status || null,
-      };
+    renderMessages(result.messages || []);
+    setTodoPlan(result.session.todo_plan, result.session.active_todo_id);
 
-      renderMessages(result.messages || []);
-      setTodoPlan(result.session.todo_plan, result.session.active_todo_id);
-      bumpThinking();
+    if (result.session.status === "ready_to_save") {
+      showSaveBanner();
+    } else {
+      hideSaveBanner();
+    }
 
-      if (result.session.status === "ready_to_save") {
-        showSaveBanner();
-      } else {
-        hideSaveBanner();
-      }
+    if (result.awaiting_approval) {
+      const activeTodo = (result.session.todo_plan.todos || []).find(
+        (t) => t.id === result.approval_todo_id
+      );
+      const previewText =
+        result.approval_preview ||
+        activeTodo?.description ||
+        activeTodo?.title ||
+        "Ready when you are.";
+      addApprovalBubble(result.approval_todo_id, previewText);
+      return;
+    }
 
-      if (result.awaiting_approval) {
-        const scope = result.approval_scope || (result.approval_todo_id ? "todo" : "plan");
-        const reason = result.approval_reason || null;
-        const activeTodo = (result.session.todo_plan.todos || []).find(
-          (t) => t.id === result.approval_todo_id
-        );
-        const previewText =
-          result.approval_preview ||
-          activeTodo?.description ||
-          activeTodo?.title ||
-          "ready when you are.";
-        addApprovalBubble({
-          scope,
-          todoId: result.approval_todo_id,
-          reason,
-          previewText,
+    const pending = result.pending_actions || [];
+    if (!pending.length) {
+      // Agent emitted text only — turn is done.
+      return;
+    }
+
+    // Execute each browser action the agent asked for.
+    const action_results = [];
+    for (const pa of pending) {
+      addActionBubble(pa.name, pa.args || {});
+      try {
+        const response = await handlePendingAction(pa.name, pa.args || {});
+        action_results.push({ call_id: pa.call_id, name: pa.name, response });
+      } catch (err) {
+        console.error(`action ${pa.name} failed`, err);
+        action_results.push({
+          call_id: pa.call_id,
+          name: pa.name,
+          response: { ok: false, error: err.message || String(err) },
         });
-        return;
       }
-
-      if (result.pending_clarify) {
-        addClarifyBubble(result.pending_clarify);
-        return;
-      }
-
-      if (result.pending_report) {
-        addReportBubble(result.pending_report);
-        return;
-      }
-
-      const pending = result.pending_actions || [];
-      if (!pending.length) {
-        // Agent emitted text only — turn is done.
-        return;
-      }
-
-      // Execute each browser action the agent asked for. Thinking indicator
-      // stays alive — gets bumped below each new action bubble.
-      const action_results = [];
-      let batchHadFailure = false;
-      for (const pa of pending) {
-        const bubble = addActionBubble(pa.name, pa.args || {});
-        bumpThinking();
-        try {
-          const response = await handlePendingAction(pa.name, pa.args || {});
-          const ok = response && response.ok !== false;
-          if (!ok) batchHadFailure = true;
-          markActionBubble(bubble, ok ? "ok" : "fail", response);
-          action_results.push({ call_id: pa.call_id, name: pa.name, response });
-        } catch (err) {
-          console.error(`action ${pa.name} failed`, err);
-          batchHadFailure = true;
-          markActionBubble(bubble, "fail", { error: err.message || String(err) });
-          action_results.push({
-            call_id: pa.call_id,
-            name: pa.name,
-            response: { ok: false, error: err.message || String(err) },
-          });
-        }
-        bumpThinking();
-      }
-      lastActionFailed = batchHadFailure;
-      payload = { user_message: null, action_results };
     }
-    addBubble("assistant", "(hit the step cap — taking a breath.)", { cls: "system" });
-  } catch (err) {
-    agentStuckFlag = true;
-    throw err;
-  } finally {
-    thinking?.remove();
+    payload = { user_message: null, action_results };
   }
+  addBubble("assistant", "(hit the step cap — taking a breath.)", { cls: "system" });
 }
-
-// ── Heartbeat watchdog ───────────────────────────────────────
-// Fires every 15 s. If the agent exited via an error and hasn't resumed
-// after 60 s (and isn't waiting for user approval), nudge it to recover.
-const HEARTBEAT_IDLE_MS = 45_000; // nudge after 45s of silence
-
-setInterval(() => {
-  const snap = lastSessionSnapshot;
-  const hasStalledTodo =
-    snap &&
-    snap.status !== "ready_to_save" &&
-    snap.status !== "saved" &&
-    (snap.todos || []).some((t) => {
-      const s = (t?.status || "pending").toLowerCase();
-      return s !== "done" && s !== "failed" && s !== "skipped";
-    });
-
-  const idleMs = lastAgentActivityAt ? Date.now() - lastAgentActivityAt : null;
-  const reason =
-    running                              ? "running" :
-    !sessionId                           ? "no-session" :
-    pendingApprovalBubble                ? "awaiting-approval" :
-    !lastAgentActivityAt                 ? "no-activity-yet" :
-    idleMs < HEARTBEAT_IDLE_MS           ? `idle-${Math.round(idleMs / 1000)}s` :
-    (!agentStuckFlag && !lastActionFailed && !hasStalledTodo) ? "no-stuck-signal" :
-    null;
-
-  // Periodic diagnostic — helps debug why the nudge didn't fire.
-  // Only logs when we have a session and some reason to care.
-  if (sessionId && (hasStalledTodo || agentStuckFlag || lastActionFailed)) {
-    console.log("[heartbeat]", reason || "FIRING", {
-      idleMs,
-      agentStuckFlag,
-      lastActionFailed,
-      hasStalledTodo,
-      status: snap?.status,
-      activeTodoId: snap?.activeTodoId,
-      todoCount: snap?.todos?.length,
-    });
-  }
-
-  if (reason) return;
-
-  console.log("[heartbeat] agent stuck — nudging to recover");
-  agentStuckFlag = false;
-  lastActionFailed = false;
-  lastAgentActivityAt = Date.now();
-
-  // Build a specific nudge for the v3 run-to-completion shape.
-  let nudge =
-    "[HEARTBEAT] You have been idle for 45+ seconds. Remember: you are an " +
-    "agent, not a chatbot. The plan is approved — run the next concrete tool " +
-    "for the active todo. Valid next moves: (a) next browser action, " +
-    "(b) mark_todo_done + start next todo's first tool IN THE SAME TURN, " +
-    "(c) clarify with ≥2 options if there's a real fork, " +
-    "(d) report if all todos are done. Do NOT reply chat-only.";
-  if (hasStalledTodo && snap?.activeTodoId) {
-    const active = (snap.todos || []).find((t) => t.id === snap.activeTodoId);
-    if (active) {
-      nudge +=
-        ` Active todo is "${active.title || active.id}" ` +
-        `(status=${active.status || "pending"}).`;
-    }
-  }
-
-  setRunning(true);
-  driveAgentStep({
-    user_message: nudge,
-    action_results: [],
-  }).catch((e) =>
-    addBubble("assistant", `(heartbeat nudge failed: ${e.message})`, { cls: "error" })
-  ).finally(() => setRunning(false));
-}, 15_000);
 
 // ── Pending action dispatcher ───────────────────────────────
 async function handlePendingAction(name, args) {
@@ -919,14 +509,6 @@ async function handlePendingAction(name, args) {
     return snapshotResponse(state, { ok: true });
   }
 
-  // Force Google OAuth refresh
-  if (name === "reauth_google") {
-    await clearGoogleAuthToken();
-    const token = await getGoogleAuthToken();
-    if (token) return { ok: true, message: "Google auth token refreshed successfully." };
-    return { ok: false, error: "Google OAuth failed — user may need to sign in again." };
-  }
-
   // Google Workspace — route through backend
   if (
     name === "sheets_create" || name === "sheets_write" || name === "sheets_read" ||
@@ -958,11 +540,11 @@ async function handlePendingAction(name, args) {
   // "probe_site" / "screenshot" / "ensure_session" / "verify" map to captureState
   if (name === "probe_site") {
     const state = await captureState(true);
-    return snapshotResponse(state, { ok: true, purpose: "probe_site" }, { includeScreenshot: true });
+    return snapshotResponse(state, { ok: true, purpose: "probe_site" });
   }
   if (name === "screenshot") {
     const state = await captureState(true);
-    return snapshotResponse(state, { ok: true, purpose: "screenshot" }, { includeScreenshot: true });
+    return snapshotResponse(state, { ok: true, purpose: "screenshot" });
   }
   if (name === "ensure_session") {
     const state = await captureState(false);
@@ -971,52 +553,10 @@ async function handlePendingAction(name, args) {
   }
   if (name === "verify") {
     const state = await captureState(false);
-    const url = (state?.url || "").toLowerCase();
+    const expected = (args.expected_text || args.expected || "").toLowerCase();
     const flat = flattenElements(state.elements).toLowerCase();
-    const urlContains = (args.url_contains || "").toLowerCase().trim();
-    const textContains = (args.text_contains || "").toLowerCase().trim();
-    const expected = (args.expected_text || args.expected || "").toLowerCase().trim();
-
-    const signals = [];
-    let pass = true;
-
-    if (urlContains) {
-      const hit = url.includes(urlContains);
-      signals.push({ check: "url_contains", value: urlContains, pass: hit });
-      if (!hit) pass = false;
-    }
-    if (textContains) {
-      const hit = flat.includes(textContains);
-      signals.push({ check: "text_contains", value: textContains, pass: hit });
-      if (!hit) pass = false;
-    }
-    // Only fall back to fuzzy token coverage if no structured check was given.
-    if (!urlContains && !textContains && expected) {
-      const STOP = new Set(["the","a","an","of","for","to","and","in","on","is","with","at","or","by","as","be","page","showing","information"]);
-      const tokens = expected.split(/[^\p{L}\p{N}]+/u).filter((t) => t && !STOP.has(t));
-      const present = tokens.filter((t) => flat.includes(t) || url.includes(t));
-      const coverage = tokens.length ? present.length / tokens.length : 0;
-      const hit = coverage >= 0.5;
-      signals.push({
-        check: "token_coverage",
-        value: expected,
-        coverage: Number(coverage.toFixed(2)),
-        matched: present,
-        missing: tokens.filter((t) => !present.includes(t)),
-        pass: hit,
-      });
-      if (!hit) pass = false;
-    }
-    if (!signals.length) {
-      // No expected-signal args at all — just report state.
-      return snapshotResponse(state, {
-        ok: false,
-        error: "verify needs at least one of url_contains / text_contains / expected",
-      });
-    }
-    // No screenshot here — verify is for deterministic assertions. If Pixel
-    // wants to SEE the page, it calls screenshot explicitly.
-    return snapshotResponse(state, { ok: pass, signals });
+    const present = !!expected && flat.includes(expected);
+    return snapshotResponse(state, { ok: present, expected, present });
   }
 
   // Click-by-coordinates
@@ -1048,41 +588,24 @@ function buildExecAction(name, args) {
   return { type: name, ...args };
 }
 
-function snapshotResponse(state, extras = {}, { includeScreenshot = false } = {}) {
+function snapshotResponse(state, extras = {}) {
   const tab = state?.screenshot || {};
-  const raw = Array.isArray(state?.elements) ? state.elements : [];
-  const MAX_ELEMENTS = 120;
-  const compactElements = raw.slice(0, MAX_ELEMENTS).map((e) => {
-    const out = { ref: e.ref, tag: e.tag };
-    const desc = (e.desc || e.text || "").toString().trim();
-    if (desc) out.desc = desc.length > 160 ? desc.slice(0, 160) + "…" : desc;
-    const value = (e.value || "").toString().trim();
-    if (value) out.value = value.length > 100 ? value.slice(0, 100) + "…" : value;
-    if (e.role) out.role = e.role;
-    if (e.href) out.href = e.href;
-    return out;
-  });
-  const out = {
+  const elementsCount = Array.isArray(state?.elements) ? state.elements.length : 0;
+  const url = state?.url || "";
+  const title = state?.title || "";
+  // Avoid shipping the element list back to the backend — it'd balloon the
+  // Gemini conversation. Just describe the result.
+  return {
     ...extras,
-    url: state?.url || "",
-    title: state?.title || "",
-    element_count: raw.length,
-    elements: compactElements,
-    elements_truncated: raw.length > MAX_ELEMENTS,
+    url: url,
+    title: title,
+    element_count: elementsCount,
     popup: state?.popup ? truthy(state.popup) : null,
     captcha: state?.captcha ? truthy(state.captcha) : null,
     dialog: state?.dialog || null,
     tab_id: tab.tabId || null,
     page_loading: !!state?.pageLoading,
   };
-  // Ship the image bytes ONLY when requested (probe_site / screenshot /
-  // verify). Gemini's multimodal: the backend will pull this out and attach
-  // it as an image Part so Pro can actually SEE the page.
-  if (includeScreenshot && tab.base64) {
-    out.screenshot_base64 = tab.base64;
-    out.screenshot_mime = tab.mime || "image/jpeg";
-  }
-  return out;
 }
 
 function truthy(obj) {
@@ -1105,15 +628,7 @@ function guessAuthState(state) {
 
 async function callWorkspace(name, args) {
   const token = await getGoogleAuthToken();
-  if (!token) {
-    return {
-      ok: false,
-      error:
-        "no google oauth token — call reauth_google() to trigger re-auth, then retry. " +
-        "If reauth_google also fails with 'bad client id' or similar, the extension's " +
-        "OAuth config is broken and the user must fix it in Google Cloud Console.",
-    };
-  }
+  if (!token) return { ok: false, error: "no google oauth token" };
 
   const endpointMap = {
     sheets_create: "/sheets/create",
@@ -1136,9 +651,7 @@ async function callWorkspace(name, args) {
   });
   if (!resp.ok) {
     const text = await resp.text();
-    const hint = (resp.status === 401 || resp.status === 403)
-      ? " — call reauth_google() then retry" : "";
-    return { ok: false, error: `${resp.status} ${text}${hint}` };
+    return { ok: false, error: `${resp.status} ${text}` };
   }
   const data = await resp.json();
   return { ok: true, ...data };
@@ -1192,8 +705,6 @@ async function captureScreenshot(tab) {
   let dataUrl = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      // PNG — lossless. Needed for reliable CAPTCHA text, fine UI details,
-      // and anti-aliased text on charts/canvas.
       dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
       break;
     } catch (e) {
@@ -1202,7 +713,6 @@ async function captureScreenshot(tab) {
   }
   return {
     base64: dataUrl ? dataUrl.split(",")[1] : null,
-    mime: "image/png",
     tabId: tab.id,
     width: tab.width,
     height: tab.height,
@@ -1271,25 +781,25 @@ async function savePlaybook() {
   });
   if (!resp.ok) {
     const t = await resp.text();
-    addBubble("assistant", `save failed: ${t}`, { cls: "error" });
+    addBubble("assistant", `Save failed: ${t}`, { cls: "error" });
     return;
   }
   const data = await resp.json();
   hideSaveBanner();
-  addBubble("assistant", `saved as "${data.playbook.title}".`, { cls: "system" });
+  addBubble("assistant", `💾 Saved as "${data.playbook.title}".`, { cls: "system" });
 }
 
 async function loadPlaybooks() {
   playbooksList.innerHTML = '<div class="playbooks-empty">Loading…</div>';
   const resp = await apiFetch(`${API_BASE}/playbooks`);
   if (!resp.ok) {
-    playbooksList.innerHTML = `<div class="playbooks-empty">couldn't load (${resp.status}).</div>`;
+    playbooksList.innerHTML = `<div class="playbooks-empty">Couldn't load (${resp.status}).</div>`;
     return;
   }
   const records = await resp.json();
   playbooksList.innerHTML = "";
   if (!records.length) {
-    playbooksList.innerHTML = '<div class="playbooks-empty">no saved playbooks yet.</div>';
+    playbooksList.innerHTML = '<div class="playbooks-empty">No saved playbooks yet.</div>';
     return;
   }
   for (const pb of records) {
@@ -1344,7 +854,7 @@ async function openPlaybook(pb) {
   const seedMessage = promptLines.join("\n");
 
   addBubble("user", `Run playbook: "${pb.title}"`);
-  addBubble("assistant", `loading playbook "${pb.title}" (running on flash)…`, { cls: "system" });
+  addBubble("assistant", `Loading playbook "${pb.title}" (running on Flash)…`, { cls: "system" });
   setRunning(true);
   try {
     try { await initTabManager(); } catch (e) { console.warn("initTabManager", e); }
@@ -1356,7 +866,7 @@ async function openPlaybook(pb) {
     setTodoPlan(envelope.session.todo_plan, envelope.session.active_todo_id);
     await driveAgentStep({ user_message: null, action_results: [] });
   } catch (err) {
-    addBubble("assistant", `couldn't run playbook: ${err.message}`, { cls: "error" });
+    addBubble("assistant", `Couldn't run playbook: ${err.message}`, { cls: "error" });
   } finally {
     setRunning(false);
   }
@@ -1375,35 +885,15 @@ function hideSignIn() {
 
 function renderUserChip(user) {
   if (!userChip || !user) return;
-  const displayName = user.name || user.email || "";
-  const firstName = (displayName.trim().split(/\s+/)[0] || "").toLowerCase() || "partner";
-
-  // Initials block: first two initials of display name (fallback ?)
-  const avatarBlock = document.getElementById("userAvatarBlock");
-  if (avatarBlock) {
-    const parts = displayName.trim().split(/\s+/);
-    const initials = ((parts[0]?.[0] || "") + (parts[1]?.[0] || "")).toUpperCase();
-    avatarBlock.textContent = initials || "?";
-  }
-
-  // Google photo avatar — only show it if we actually have a photo URL.
   if (userAvatar) {
     if (user.picture) {
       userAvatar.src = user.picture;
       userAvatar.classList.remove("hidden");
-      avatarBlock?.classList.add("hidden");
     } else {
       userAvatar.classList.add("hidden");
-      avatarBlock?.classList.remove("hidden");
     }
   }
-
-  // Chip label is just the first name — keep it short and lowercase per voice.
-  if (userName) userName.textContent = firstName;
-
-  // Personalize the input placeholder.
-  if (taskInput) taskInput.placeholder = `what do you need, ${firstName}?`;
-
+  if (userName) userName.textContent = user.name || user.email || "Signed in";
   userChip.classList.remove("hidden");
 }
 
@@ -1411,41 +901,23 @@ function clearUserChip() {
   userChip?.classList.add("hidden");
   if (userName) userName.textContent = "";
   if (userAvatar) userAvatar.src = "";
-  const avatarBlock = document.getElementById("userAvatarBlock");
-  if (avatarBlock) avatarBlock.textContent = "?";
-  if (taskInput) taskInput.placeholder = "what do you need, partner?";
-}
-
-// Preserve the button's original innerHTML (SVG + span) so we can restore
-// it cleanly instead of nuking the Google icon when flipping button text.
-const SIGNIN_BTN_ORIGINAL_HTML = signinBtn?.innerHTML || "";
-
-function setSigninLabel(text) {
-  if (!signinBtn) return;
-  // Find the text span inside the original markup and update just that.
-  const span = signinBtn.querySelector("span");
-  if (span) {
-    span.textContent = text;
-  } else {
-    signinBtn.textContent = text;
-  }
 }
 
 async function handleSignIn() {
   if (signinError) signinError.textContent = "";
   if (signinBtn) {
     signinBtn.disabled = true;
-    setSigninLabel("signing in…");
+    signinBtn.textContent = "Signing in…";
   }
   try {
     const token = await getGoogleIdToken({ interactive: true });
     if (!token) {
-      if (signinError) signinError.textContent = "sign-in cancelled or failed. try again.";
+      if (signinError) signinError.textContent = "Sign-in cancelled or failed. Try again.";
       return;
     }
     const resp = await apiFetch(`${API_BASE}/me`);
     if (!resp.ok) {
-      if (signinError) signinError.textContent = `backend rejected token (${resp.status}).`;
+      if (signinError) signinError.textContent = `Backend rejected token (${resp.status}).`;
       await signOut();
       return;
     }
@@ -1454,13 +926,11 @@ async function handleSignIn() {
     hideSignIn();
     showLanding();
   } catch (err) {
-    if (signinError) signinError.textContent = (err.message || "unexpected error.").toLowerCase();
+    if (signinError) signinError.textContent = err.message || "Unexpected error.";
   } finally {
     if (signinBtn) {
       signinBtn.disabled = false;
-      // Restore original markup so the SVG icon comes back, then set label.
-      if (SIGNIN_BTN_ORIGINAL_HTML) signinBtn.innerHTML = SIGNIN_BTN_ORIGINAL_HTML;
-      setSigninLabel("sign in with google");
+      signinBtn.textContent = "Sign in with Google";
     }
   }
 }

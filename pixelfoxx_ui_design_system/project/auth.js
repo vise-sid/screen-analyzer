@@ -170,34 +170,24 @@ async function signOut() {
   cachedIdToken = null;
   cachedAccessToken = null;
   await chrome.storage.local.remove([STORAGE_KEY, USER_STORAGE_KEY]);
+  try {
+    // Best-effort revoke of the Workspace access token too.
+    const existing = await new Promise((resolve) => {
+      chrome.identity.getAuthToken({ interactive: false }, (t) => resolve(t));
+    });
+    if (existing) {
+      await new Promise((resolve) => {
+        chrome.identity.removeCachedAuthToken({ token: existing }, resolve);
+      });
+    }
+  } catch (_) {}
 }
 
 // ── Access token (for Google Workspace APIs) ───────────────────────────────
-// Uses the SAME Web Application OAuth client as the ID token, via
-// launchWebAuthFlow. No "Chrome Extension"-type OAuth client is needed —
-// the manifest's oauth2 block is intentionally unused.
+// Unchanged from the previous implementation — Workspace APIs need
+// access_tokens via the Chrome Extension OAuth client from manifest.json.
 
-const WORKSPACE_SCOPES = [
-  "https://www.googleapis.com/auth/spreadsheets",
-  "https://www.googleapis.com/auth/documents",
-  "https://www.googleapis.com/auth/presentations",
-  "https://www.googleapis.com/auth/drive.file",
-].join(" ");
-
-function buildWorkspaceAuthUrl({ interactive }) {
-  const redirectUri = chrome.identity.getRedirectURL();
-  const params = new URLSearchParams({
-    client_id: WEB_CLIENT_ID,
-    response_type: "token",
-    scope: WORKSPACE_SCOPES,
-    redirect_uri: redirectUri,
-    include_granted_scopes: "true",
-  });
-  if (!interactive) params.set("prompt", "none");
-  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-}
-
-async function getGoogleAuthToken({ interactive = true } = {}) {
+async function getGoogleAuthToken() {
   if (cachedAccessToken) {
     try {
       const resp = await fetch(
@@ -209,40 +199,33 @@ async function getGoogleAuthToken({ interactive = true } = {}) {
     cachedAccessToken = null;
   }
 
-  // Try silent first, then interactive — same pattern as getGoogleIdToken.
-  const runFlow = (interactiveFlag) =>
-    new Promise((resolve) => {
-      chrome.identity.launchWebAuthFlow(
-        {
-          url: buildWorkspaceAuthUrl({ interactive: interactiveFlag }),
-          interactive: interactiveFlag,
-        },
-        (redirectUrl) => {
-          if (chrome.runtime.lastError || !redirectUrl) {
-            resolve(null);
-            return;
-          }
-          const hash = (redirectUrl.split("#")[1] || "").replace(/^\//, "");
-          const token = new URLSearchParams(hash).get("access_token");
-          resolve(token || null);
-        }
-      );
+  return new Promise((resolve) => {
+    chrome.identity.getAuthToken({ interactive: true }, (token) => {
+      if (chrome.runtime.lastError) {
+        console.error("OAuth failed:", chrome.runtime.lastError.message);
+        resolve(null);
+        return;
+      }
+      cachedAccessToken = token;
+      console.log("Google OAuth access token obtained");
+      resolve(token);
     });
-
-  let token = await runFlow(false);
-  if (!token && interactive) token = await runFlow(true);
-
-  if (token) {
-    cachedAccessToken = token;
-    console.log("Google Workspace access token obtained");
-  }
-  return token;
+  });
 }
 
 async function clearGoogleAuthToken() {
-  // launchWebAuthFlow doesn't cache tokens in Chrome's identity store, so
-  // there's nothing to revoke here — just drop the in-memory copy.
-  cachedAccessToken = null;
+  if (cachedAccessToken) {
+    return new Promise((resolve) => {
+      chrome.identity.removeCachedAuthToken(
+        { token: cachedAccessToken },
+        () => {
+          cachedAccessToken = null;
+          console.log("Google OAuth access token cleared");
+          resolve();
+        }
+      );
+    });
+  }
 }
 
 // ── Authenticated fetch helper ─────────────────────────────────────────────
