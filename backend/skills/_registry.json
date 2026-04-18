@@ -1,0 +1,4 @@
+{
+  "_comment": "Map of skill_name → skill_id. Populated by scripts/upload_skills.py after each upload. Commit after every change.",
+  "skills": {}
+}

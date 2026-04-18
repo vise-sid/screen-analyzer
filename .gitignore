@@ -11,3 +11,11 @@ backend/data.db-wal
 backend/data.db-shm
 key.pem
 *.pem
+
+# Eval run outputs
+evals/results/
+
+# IDE / editor cruft
+.idea/
+.vscode/
+*.swp

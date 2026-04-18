@@ -1,7 +1,12 @@
-// Open side panel when extension icon is clicked
+// Service worker — opens the side panel when the toolbar action is clicked.
 chrome.action.onClicked.addListener((tab) => {
-  chrome.sidePanel.open({ tabId: tab.id });
+  chrome.sidePanel.open({ tabId: tab.id }).catch((e) =>
+    console.error("[pixelfoxx] sidePanel.open failed:", e)
+  );
 });
 
-// Enable side panel to open on action click
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.sidePanel
+    .setPanelBehavior({ openPanelOnActionClick: true })
+    .catch((e) => console.warn("[pixelfoxx] setPanelBehavior:", e));
+});
