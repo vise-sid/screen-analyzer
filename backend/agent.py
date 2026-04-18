@@ -1,15 +1,29 @@
 """
-Pixel agent loop — minimal Anthropic + Skills + programmatic tool calling.
+Pixel agent loop — Anthropic + Skills + programmatic tool calling.
 
-This is intentionally small. Domain knowledge lives in skills (uploaded to
-Anthropic's Skills API and referenced via skill_id), NOT in this file.
-The system prompt is ~500 chars. Tools are ~13 primitives. Everything else
-is a skill the model auto-discovers via progressive disclosure.
+Option A build: full loop wired with mock programmatic primitives.
 
-Skeleton stage: agent_step() is not yet wired to a real tool dispatcher.
-The structure shows the intended shape — primitive tool definitions,
-container with skills + code execution, message loop with pause_turn
-handling for long-running skill operations.
+Loop shape (per session turn):
+  1. Append the new user input (message / approval / clarify-choice) to
+     session.messages.
+  2. Call beta.messages.create with the full history + container (skills
+     + maybe container_id for reuse) + tool list.
+  3. Handle response by stop_reason:
+       end_turn      → turn complete; return to client.
+       pause_turn    → long-running skill; resend unchanged, continue.
+       tool_use      → walk the content blocks:
+                         - server_tool_use (code_execution itself): ignore,
+                           sandbox handles it
+                         - tool_use with caller=code_execution_*: dispatch
+                           via mocks, collect tool_result
+                         - tool_use with no caller: handle as direct tool
+                           (chat / set_plan / done / request_approval /
+                           clarify / report) — update session state,
+                           return {ok:true} tool_result, possibly break
+                           the loop if it's a user-pause.
+                       Append tool_result blocks as a user message, loop.
+  4. Break on any user-pausing state (awaiting_approval / awaiting_clarify
+     / done) or max-iterations (safety net against runaway chat-only loops).
 """
 from __future__ import annotations
 
@@ -20,8 +34,21 @@ from typing import Any
 
 from anthropic import Anthropic
 
+from mocks import execute_programmatic
+from session_store import PlanStep, Session
+from tools import ALL_TOOLS
+
+# Programmatic primitives split by WHERE they run.
+# Backend-executed run in our process (workspace hits Google via gspread,
+# vision hits Gemini Flash). Browser-executed must round-trip through the
+# extension via CDP/content-script.
+BACKEND_EXECUTED_TOOLS = {"workspace", "vision"}
+BROWSER_EXECUTED_TOOLS = {
+    "navigate", "click", "type", "key", "scroll", "observe", "reauth_google"
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Model + container config
+# Config
 # ─────────────────────────────────────────────────────────────────────────────
 
 AGENT_MODEL = os.getenv("PIXEL_AGENT_MODEL", "claude-sonnet-4-6")
@@ -30,7 +57,11 @@ MAX_TOKENS = int(os.getenv("PIXEL_MAX_TOKENS", "4096"))
 # Verified compatible Apr 19 — both betas can be enabled with code_execution_20260120.
 BETAS = ["code-execution-2025-08-25", "skills-2025-10-02"]
 
-# Loaded lazily so the module imports without an API key (e.g. in tests).
+# Per-turn loop cap (multiple Anthropic calls happen when tools round-trip).
+# Safety net against runaway chat-only loops; each programmatic dispatch
+# counts as one iteration.
+MAX_LOOP_ITERATIONS = int(os.getenv("PIXEL_MAX_LOOP_ITERATIONS", "30"))
+
 _client: Anthropic | None = None
 
 
@@ -42,9 +73,7 @@ def client() -> Anthropic:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Skill registry — committed at backend/skills/_registry.json
-#   { "logging-to-sheets": "skill_01...", "verifying-page-state": "skill_01...", ... }
-# Populated by scripts/upload_skills.py after each skill upload.
+# Skill registry — backend/skills/_registry.json (populated by upload script).
 # ─────────────────────────────────────────────────────────────────────────────
 
 REGISTRY_PATH = Path(__file__).parent / "skills" / "_registry.json"
@@ -53,19 +82,32 @@ REGISTRY_PATH = Path(__file__).parent / "skills" / "_registry.json"
 def load_skill_registry() -> dict[str, str]:
     if not REGISTRY_PATH.exists():
         return {}
-    return json.loads(REGISTRY_PATH.read_text())
+    raw = json.loads(REGISTRY_PATH.read_text())
+    return raw.get("skills", {}) if isinstance(raw, dict) else {}
 
 
 def container_skills(version: str = "latest") -> list[dict]:
-    """Build the `container.skills` array for the Messages API request.
-    Caps at 8 (Anthropic's per-request limit).
-    """
     registry = load_skill_registry()
-    skills = [
+    return [
         {"type": "custom", "skill_id": sid, "version": version}
         for sid in list(registry.values())[:8]
     ]
-    return skills
+
+
+def build_container(session: Session) -> dict[str, Any] | None:
+    """Build the container parameter. Returns None if there's nothing to send
+    (no skills uploaded yet AND no container to reuse) — empty `{"skills": []}`
+    seems to confuse the API and block code_execution invocation.
+    """
+    skills = container_skills()
+    if not skills and not session.container_id:
+        return None
+    c: dict[str, Any] = {}
+    if skills:
+        c["skills"] = skills
+    if session.container_id:
+        c["id"] = session.container_id
+    return c
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -80,54 +122,257 @@ Every turn pairs a one-line `chat` narration with a concrete tool call. Run plan
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Primitive tool surface — the only tools the model ever sees.
-# Imported from tools.py to keep this file focused on the loop.
-# ─────────────────────────────────────────────────────────────────────────────
-
-from tools import ALL_TOOLS  # noqa: E402
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Agent step — the loop.
-# Skeleton: this is the shape, not a working implementation. Real wiring
-# (extension dispatch, container reuse, pause_turn, prompt caching) lands
-# in subsequent commits.
+# Helpers for response handling
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def agent_step(
+def _content_block_to_dict(block: Any) -> dict[str, Any]:
+    """Convert an Anthropic content block to the dict shape the API accepts
+    when sent back as part of an assistant message."""
+    if hasattr(block, "model_dump"):
+        return block.model_dump(exclude_none=True)
+    return dict(block)  # best effort fallback
+
+
+def _extract_caller_type(block: Any) -> str | None:
+    """Return the caller.type if this is a programmatic tool_use block, else None."""
+    caller = getattr(block, "caller", None)
+    if caller is None:
+        return None
+    # Pydantic model OR plain dict
+    t = getattr(caller, "type", None) or (caller.get("type") if isinstance(caller, dict) else None)
+    return t
+
+
+def _ok_result(tool_use_id: str, payload: dict | str | None = None) -> dict:
+    content = json.dumps(payload or {"ok": True}) if not isinstance(payload, str) else payload
+    return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
+
+
+def _apply_set_plan(session: Session, args: dict) -> None:
+    mode = (args.get("mode") or "replace").lower()
+    steps = args.get("steps") or []
+    new_steps = [
+        PlanStep(id=str(s.get("id")), title=str(s.get("title", "")), description=str(s.get("description", "")))
+        for s in steps if s.get("id") and s.get("title")
+    ]
+    if mode == "extend":
+        session.plan.extend(new_steps)
+    else:
+        session.plan = new_steps
+    session.active_step_id = next((s.id for s in session.plan if s.status in ("pending", "running")), None)
+
+
+def _apply_done(session: Session, args: dict) -> None:
+    step_id = str(args.get("step_id") or "")
+    for s in session.plan:
+        if s.id == step_id:
+            s.status = "done"
+            break
+    session.active_step_id = next((s.id for s in session.plan if s.status == "pending"), None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The loop driver
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def drive_turn(
+    session: Session,
     *,
-    messages: list[dict[str, Any]],
-    container_id: str | None = None,
-) -> dict[str, Any]:
-    """Drive one agent turn.
+    user_input: str | None = None,
+    browser_results: list[dict] | None = None,
+) -> Session:
+    """Advance the session one turn.
 
-    `messages` is the full conversation history in Anthropic Messages format.
-    Returns a dict with the assistant's response, the container ID for reuse,
-    and the stop_reason (so callers can detect pause_turn vs tool_use vs end_turn).
+    Either a user message (fresh turn) OR browser_results (resume from
+    awaiting_browser). Runs the Anthropic loop, pausing whenever a
+    programmatic browser tool needs the extension, approval/clarify is
+    requested, or report() fires. Mutates `session` in place.
     """
-    container: dict[str, Any] = {"skills": container_skills()}
-    if container_id:
-        container["id"] = container_id
+    if browser_results is not None:
+        # Resume from awaiting_browser. Merge the extension's results with
+        # any direct-tool OK results saved from the same Anthropic response,
+        # then append as one tool_result user message.
+        merged: list[dict] = list(session.pending_direct_results or [])
+        for r in browser_results:
+            merged.append({
+                "type": "tool_result",
+                "tool_use_id": r["tool_use_id"],
+                "content": json.dumps(r.get("content")) if not isinstance(r.get("content"), str) else r["content"],
+            })
+        session.messages.append({"role": "user", "content": merged})
+        session.pending_browser_tools = None
+        session.pending_direct_results = None
+        session.status = "active"
+    elif user_input is not None and user_input.strip():
+        session.messages.append({"role": "user", "content": user_input.strip()})
 
-    response = client().beta.messages.create(
-        model=AGENT_MODEL,
-        max_tokens=MAX_TOKENS,
-        betas=BETAS,
-        system=SYSTEM_PROMPT,
-        container=container,
-        tools=ALL_TOOLS,
-        messages=messages,
-    )
+    # Per-turn UI buffers — reset each drive. (The caller renders these;
+    # a browser-round-trip call also gets fresh buffers for the new actions.)
+    session.chats = []
+    session.actions = []
 
-    return {
-        "stop_reason": response.stop_reason,
-        "content": response.content,
-        "container_id": response.container.id if response.container else None,
-        "usage": {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
-            "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0),
-            "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0),
-        },
-    }
+    for iteration in range(MAX_LOOP_ITERATIONS):
+        kwargs: dict[str, Any] = dict(
+            model=AGENT_MODEL,
+            max_tokens=MAX_TOKENS,
+            betas=BETAS,
+            system=SYSTEM_PROMPT,
+            tools=ALL_TOOLS,
+            messages=session.messages,
+        )
+        container = build_container(session)
+        if container is not None:
+            kwargs["container"] = container
+        response = client().beta.messages.create(**kwargs)
+
+        # Persist container id for reuse across turns.
+        if response.container and response.container.id:
+            session.container_id = response.container.id
+
+        # Record the assistant message (serialized so it round-trips to the API).
+        assistant_content = [_content_block_to_dict(b) for b in response.content]
+        session.messages.append({"role": "assistant", "content": assistant_content})
+
+        stop = response.stop_reason
+        session.touch()
+
+        if stop == "end_turn":
+            return session
+
+        if stop == "pause_turn":
+            # Long-running skill op — resubmit as-is, let it continue.
+            continue
+
+        if stop != "tool_use":
+            # Unknown / refusal / max_tokens — stop cleanly.
+            return session
+
+        # stop_reason == "tool_use". Walk the content blocks. Programmatic
+        # tools split into:
+        #   - BACKEND_EXECUTED (workspace, vision): run inline, return result.
+        #   - BROWSER_EXECUTED (navigate/click/observe/...): queue for the
+        #     extension and pause the loop after this iteration.
+        # Direct tools (chat/set_plan/done/approve/clarify/report) are
+        # handled inline — synthesize an OK tool_result.
+        tool_results: list[dict[str, Any]] = []
+        pending_browser: list[dict[str, Any]] = []
+        user_pause = False
+
+        for block in response.content:
+            btype = getattr(block, "type", None)
+            if btype == "server_tool_use":
+                # code_execution itself — sandbox handles this. Nothing for us to do.
+                continue
+            if btype != "tool_use":
+                continue
+
+            name = block.name
+            args = dict(block.input or {})
+            caller_type = _extract_caller_type(block)
+
+            if caller_type and caller_type.startswith("code_execution_"):
+                if name in BROWSER_EXECUTED_TOOLS:
+                    # Queue for the extension. Cannot synthesize a result
+                    # here — extension provides it via a follow-up step.
+                    session.actions.append({
+                        "kind": "programmatic",
+                        "name": name,
+                        "args": args,
+                    })
+                    pending_browser.append({
+                        "tool_use_id": block.id,
+                        "name": name,
+                        "args": args,
+                    })
+                    continue
+                if name in BACKEND_EXECUTED_TOOLS:
+                    # Backend handles inline (workspace/vision). Mocks for now.
+                    session.actions.append({
+                        "kind": "programmatic",
+                        "name": name,
+                        "args": args,
+                    })
+                    result = execute_programmatic(name, args)
+                    tool_results.append(_ok_result(block.id, result))
+                    continue
+                # Unknown programmatic tool — return error so the loop unblocks.
+                tool_results.append(_ok_result(block.id, {
+                    "ok": False,
+                    "error": f"unknown programmatic tool {name!r}",
+                }))
+                continue
+
+            # Direct tool — handle as a state change + OK result.
+            session.actions.append({"kind": "direct", "name": name, "args": args})
+
+            if name == "chat":
+                msg = str(args.get("message") or "").strip()
+                if msg:
+                    session.chats.append(msg)
+                tool_results.append(_ok_result(block.id))
+
+            elif name == "set_plan":
+                _apply_set_plan(session, args)
+                tool_results.append(_ok_result(block.id, {"ok": True, "step_count": len(session.plan)}))
+
+            elif name == "done":
+                _apply_done(session, args)
+                tool_results.append(_ok_result(block.id, {"ok": True, "next_step_id": session.active_step_id}))
+
+            elif name == "request_approval":
+                session.pending_approval = args
+                session.status = "awaiting_approval"
+                tool_results.append(_ok_result(block.id))
+                user_pause = True
+
+            elif name == "clarify":
+                options = [str(o) for o in (args.get("options") or []) if str(o).strip()]
+                if len(options) < 2:
+                    # Per authoring rules: clarify requires ≥2 options.
+                    tool_results.append(_ok_result(block.id, {
+                        "ok": False,
+                        "error": "clarify requires ≥2 options; either provide real options or do not pause",
+                    }))
+                    continue
+                session.pending_clarify = {**args, "options": options}
+                session.status = "awaiting_clarify"
+                tool_results.append(_ok_result(block.id))
+                user_pause = True
+
+            elif name == "report":
+                session.final_report = args
+                session.status = "done"
+                tool_results.append(_ok_result(block.id))
+                user_pause = True
+
+            else:
+                # Unknown tool — should not happen since we own the schema.
+                tool_results.append(_ok_result(block.id, {
+                    "ok": False,
+                    "error": f"unhandled direct tool {name!r}",
+                }))
+
+        # If browser tools are pending we MUST pause — we can't send only a
+        # subset of tool_results. Save the partial direct-tool results so we
+        # can merge them in when the extension comes back with browser results.
+        if pending_browser:
+            session.pending_browser_tools = pending_browser
+            session.pending_direct_results = tool_results  # may be empty
+            session.status = "awaiting_browser"
+            return session
+
+        # No browser pause — synthesize/send all tool_results in one user message.
+        if tool_results:
+            session.messages.append({"role": "user", "content": tool_results})
+
+        if user_pause:
+            return session
+
+        # Otherwise, loop for the next Anthropic call.
+        continue
+
+    # Hit the iteration cap — note it and return.
+    session.chats.append("(hit the loop-iteration cap — pausing)")
+    return session

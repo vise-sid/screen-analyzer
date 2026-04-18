@@ -1,25 +1,304 @@
 /*
-  Skeleton CSS — placeholder only.
-  The real stylesheet is rebuilt against pixelfoxx_ui_design_system/.
-  See pixelfoxx_ui_design_system/project/PixelFoxx Design System.html
-  for the canonical design tokens, type scale, and component specs.
+  Minimal sidepanel — Option A UI.
+  Warm-black + pixel clip + Space Grotesk/JetBrains Mono/Silkscreen.
+  Full design-system pass happens in slice (C).
 */
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Silkscreen:wght@400;700&display=swap');
+
+:root {
+  --bg:        #14110E;
+  --surface:   #1C1916;
+  --surface-2: #231F1A;
+  --line:      #3A352D;
+  --line-2:    #4A4338;
+  --text:      #F4EFE6;
+  --text-dim:  #A89E8D;
+  --text-mute: #6B6357;
+  --orange:    #FF6A1A;
+  --orange-dk: #CC4D00;
+  --yellow:    #FFC83D;
+  --blue:      #4FB3D9;
+  --ok:        #7FD46B;
+  --err:       #FF5A4E;
+  --px: polygon(0 3px, 3px 3px, 3px 0, calc(100% - 3px) 0,
+                calc(100% - 3px) 3px, 100% 3px,
+                100% calc(100% - 3px), calc(100% - 3px) calc(100% - 3px),
+                calc(100% - 3px) 100%, 3px 100%,
+                3px calc(100% - 3px), 0 calc(100% - 3px));
+  --ui:    'Space Grotesk', system-ui, sans-serif;
+  --mono:  'JetBrains Mono', monospace;
+  --pixel: 'Silkscreen', monospace;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box; margin: 0; padding: 0; border-radius: 0 !important;
+}
 
 body {
-  font-family: -apple-system, system-ui, sans-serif;
-  background: #14110E;
-  color: #F4EFE6;
+  font-family: var(--ui);
+  background: var(--bg);
+  color: var(--text);
   height: 100vh;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  flex-direction: column;
+  overflow: hidden;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
 }
 
-.boot {
-  font-family: monospace;
-  font-size: 14px;
-  color: #FF6A1A;
-  letter-spacing: 0.5px;
+.hidden { display: none !important; }
+
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-thumb { background: var(--line); }
+
+/* ───── Sign-in card ───── */
+#signinCard {
+  width: 100%; max-width: 360px;
+  margin: auto; padding: 32px 24px;
+  display: flex; flex-direction: column; align-items: center;
+  gap: 12px; text-align: center;
 }
+.mascot {
+  width: 96px; height: 96px;
+  image-rendering: pixelated; clip-path: var(--px);
+}
+#signinCard h1 {
+  font-family: var(--pixel); font-size: 18px;
+  letter-spacing: 0.5px; margin-top: 8px;
+}
+.sub { color: var(--text-dim); font-size: 13px; line-height: 1.4; }
+.error {
+  font-family: var(--mono); font-size: 11px;
+  color: var(--err); min-height: 14px;
+}
+
+/* ───── Buttons ───── */
+button {
+  font-family: var(--ui); font-size: 13px; font-weight: 600;
+  padding: 9px 16px; background: var(--orange); color: #14110E;
+  border: none; clip-path: var(--px); cursor: pointer;
+  transition: background 100ms;
+}
+button:hover:not(:disabled) { background: var(--orange-dk); }
+button:disabled { opacity: 0.5; cursor: default; }
+button.ghost {
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--line);
+}
+button.ghost:hover:not(:disabled) {
+  border-color: var(--orange); color: var(--text); background: transparent;
+}
+button.sm { padding: 5px 10px; font-size: 11px; font-weight: 500; }
+
+/* ───── App shell ───── */
+#app {
+  flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
+}
+
+.app-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface); border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.mascot-sm { width: 24px; height: 24px; clip-path: var(--px); image-rendering: pixelated; }
+.brand {
+  font-family: var(--pixel); font-size: 12px; letter-spacing: 0.4px;
+  color: var(--text);
+}
+.brand span { color: var(--orange); }
+.user-chip {
+  display: flex; align-items: center; gap: 6px;
+  margin-left: auto; font-size: 11px; color: var(--text-dim);
+}
+.user-chip img { width: 20px; height: 20px; clip-path: var(--px); }
+
+/* ───── Plan strip ───── */
+.plan-strip {
+  flex-shrink: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding: 8px 12px;
+}
+.plan-head {
+  display: flex; justify-content: space-between;
+  font-family: var(--mono); font-size: 10px;
+  color: var(--text-mute); letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.plan-progress { color: var(--orange); }
+.plan-list {
+  list-style: none; display: flex; flex-direction: column; gap: 3px;
+}
+.plan-list li {
+  font-size: 11.5px; color: var(--text-dim);
+  padding: 3px 0; display: flex; align-items: center; gap: 6px;
+}
+.plan-list li .marker {
+  display: inline-block; width: 10px; text-align: center;
+  font-family: var(--mono); color: var(--text-mute);
+}
+.plan-list li.done       { color: var(--text); text-decoration: line-through; opacity: 0.65; }
+.plan-list li.done .marker    { color: var(--ok); }
+.plan-list li.running .marker { color: var(--orange); }
+.plan-list li.failed  .marker { color: var(--err); }
+
+/* ───── Chat thread ───── */
+.chat-thread {
+  flex: 1 1 auto; overflow-y: auto;
+  padding: 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.chat-empty {
+  margin: auto; color: var(--text-mute); font-size: 12px;
+  text-align: center; max-width: 240px;
+}
+
+.chat-bubble {
+  padding: 8px 12px;
+  background: var(--surface-2);
+  color: var(--text); font-size: 12.5px; line-height: 1.5;
+  clip-path: var(--px);
+  max-width: 92%;
+  white-space: pre-wrap; word-wrap: break-word;
+}
+.chat-bubble.user {
+  align-self: flex-end; background: var(--orange); color: #14110E; font-weight: 500;
+}
+.chat-bubble.assistant {
+  align-self: flex-start;
+  border-left: 2px solid var(--orange);
+  padding-left: 10px;
+}
+.chat-bubble.assistant::before {
+  content: "FOXX"; display: block;
+  font-family: var(--mono); font-size: 9.5px; color: var(--orange);
+  letter-spacing: 0.5px; margin-bottom: 4px;
+}
+.chat-bubble.system {
+  align-self: center;
+  background: transparent; color: var(--text-mute);
+  font-family: var(--mono); font-size: 10.5px;
+  border: 1px dashed var(--line);
+}
+
+/* Action bubbles — programmatic tool calls */
+.action-bubble {
+  align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 10px; max-width: 92%;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  clip-path: var(--px);
+  font-family: var(--mono); font-size: 10.5px;
+  color: var(--text-dim);
+}
+.action-tag {
+  display: inline-block; padding: 2px 6px; font-size: 9px; font-weight: 600;
+  letter-spacing: 0.4px; color: #14110E;
+}
+.action-body { color: var(--text-dim); }
+
+/* Approval card */
+.approval-card {
+  align-self: stretch;
+  background: rgba(255, 200, 61, 0.06);
+  border: 1px solid var(--yellow);
+  clip-path: var(--px);
+  padding: 12px; display: flex; flex-direction: column; gap: 10px;
+}
+.approval-card.plan  { border-color: var(--orange); background: rgba(255, 106, 26, 0.06); }
+.approval-card.todo  { border-color: var(--err);    background: rgba(255, 90, 78, 0.06); }
+.approval-head {
+  font-family: var(--mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--yellow);
+}
+.approval-card.plan .approval-head { color: var(--orange); }
+.approval-card.todo .approval-head { color: var(--err); }
+.approval-preview { font-size: 12.5px; line-height: 1.5; }
+.approval-actions { display: flex; gap: 6px; }
+.approval-actions button { flex-shrink: 0; }
+
+/* Clarify card */
+.clarify-card {
+  align-self: stretch;
+  background: rgba(79, 179, 217, 0.06);
+  border: 1px solid var(--blue);
+  clip-path: var(--px);
+  padding: 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.clarify-head {
+  font-family: var(--mono); font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--blue);
+}
+.clarify-q { font-size: 13px; line-height: 1.4; }
+.clarify-why {
+  font-size: 11px; color: var(--text-dim); font-style: italic;
+}
+.clarify-options { display: flex; flex-direction: column; gap: 6px; }
+.clarify-options button {
+  background: transparent; color: var(--text);
+  border: 1px solid var(--line-2); text-align: left;
+  padding: 8px 10px; font-size: 11.5px; font-weight: 500;
+}
+.clarify-options button:hover:not(:disabled) {
+  border-color: var(--blue); background: rgba(79, 179, 217, 0.08);
+}
+
+/* Report card (terminal) */
+.report-card {
+  align-self: stretch;
+  background: rgba(127, 212, 107, 0.05);
+  border: 1px solid var(--ok);
+  clip-path: var(--px);
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+}
+.report-head {
+  font-family: var(--mono); font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--ok);
+}
+.report-summary { font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; }
+.report-section-title {
+  font-family: var(--mono); font-size: 10px;
+  color: var(--text-mute); letter-spacing: 0.4px;
+  margin-top: 8px; text-transform: uppercase;
+}
+.report-list { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; }
+.report-list a { color: var(--orange); text-decoration: none; }
+.report-list a:hover { text-decoration: underline; }
+.report-save { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.report-save-title {
+  font-size: 10.5px; color: var(--text-dim); margin-top: 6px;
+}
+
+/* Input row */
+.input-row {
+  flex-shrink: 0;
+  display: flex; gap: 6px; padding: 8px 10px;
+  background: var(--surface); border-top: 1px solid var(--line);
+}
+#msgInput {
+  flex: 1;
+  font-family: var(--ui); font-size: 13px;
+  padding: 9px 12px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line-2); clip-path: var(--px);
+  outline: none;
+}
+#msgInput:focus { border-color: var(--orange); }
+
+/* Thinking dots */
+.thinking {
+  align-self: flex-start; display: flex; gap: 4px; padding: 10px 12px;
+  background: var(--surface-2); clip-path: var(--px);
+}
+.thinking span {
+  width: 5px; height: 5px; background: var(--orange);
+  animation: fxPulse 1s infinite ease-in-out;
+}
+.thinking span:nth-child(2) { animation-delay: 160ms; }
+.thinking span:nth-child(3) { animation-delay: 320ms; }
+@keyframes fxPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }

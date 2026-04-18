@@ -7,22 +7,54 @@
     <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
-    <main id="root">
-      <!--
-        Skeleton placeholder. The real sidepanel is rebuilt against
-        pixelfoxx_ui_design_system/ — see docs/SPEC.md.
+    <!-- Signed-out overlay -->
+    <section id="signinCard" class="card">
+      <img src="icons/base.png" alt="" class="mascot" />
+      <h1>PixelFoxx</h1>
+      <p class="sub">Sign in with Google to begin.</p>
+      <button id="signInBtn" type="button">Sign in with Google</button>
+      <p id="signInError" class="error" aria-live="polite"></p>
+    </section>
 
-        Visual contract:
-          - sign-in overlay (Google ID token → backend)
-          - chat thread (text bubbles, action bubbles, plan-approval card,
-            destructive-approval card, clarify card with option chips,
-            terminal report card)
-          - todo strip
-          - activity bar
-          - input row
-      -->
-      <div class="boot">PixelFoxx — skeleton</div>
+    <!-- Signed-in app shell -->
+    <main id="app" class="hidden">
+      <header class="app-header">
+        <img src="icons/base.png" class="mascot-sm" alt="" />
+        <span class="brand">PIXEL<span>FOXX</span></span>
+        <span id="userChip" class="user-chip">
+          <img id="userAvatar" alt="" />
+          <span id="userName"></span>
+        </span>
+        <button id="newSessionBtn" type="button" class="ghost sm">new</button>
+        <button id="signOutBtn" type="button" class="ghost sm">sign out</button>
+      </header>
+
+      <aside id="planStrip" class="plan-strip hidden">
+        <div class="plan-head">
+          <span class="plan-label">PLAN</span>
+          <span id="planProgress" class="plan-progress">0/0</span>
+        </div>
+        <ol id="planList" class="plan-list"></ol>
+      </aside>
+
+      <section id="chatThread" class="chat-thread">
+        <div class="chat-empty">
+          Type a task below. I&rsquo;ll run it end-to-end with mocks.
+        </div>
+      </section>
+
+      <form id="inputRow" class="input-row">
+        <input
+          id="msgInput"
+          type="text"
+          placeholder="what do you need, partner?"
+          autocomplete="off"
+          required
+        />
+        <button id="sendBtn" type="submit">send</button>
+      </form>
     </main>
-    <script src="sidepanel.js"></script>
+
+    <script src="dist/sidepanel.js"></script>
   </body>
 </html>

@@ -1,0 +1,17 @@
+{
+  "name": "pixelfoxx-extension",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "PixelFoxx Chrome extension — sidepanel UI + playwright-crx browser primitives.",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch"
+  },
+  "dependencies": {
+    "playwright-crx": "^0.15.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
+  }
+}

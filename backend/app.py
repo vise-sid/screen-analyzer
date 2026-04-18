@@ -20,10 +20,18 @@ app = FastAPI(title="PixelFoxx Backend", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["chrome-extension://*", "http://localhost:*"],
+    # Chrome extensions send Origin: chrome-extension://<id>. We can't enumerate
+    # in dev, so allow_origin_regex covers any extension. Tighten in prod.
+    allow_origin_regex=r"chrome-extension://.*|http://localhost(:\d+)?",
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from auth_routes import router as auth_router  # noqa: E402
+from agent_routes import router as agent_router  # noqa: E402
+
+app.include_router(auth_router)
+app.include_router(agent_router)
 
 
 @app.get("/health")
