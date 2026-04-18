@@ -1,0 +1,1749 @@
+/**
+ * CDP Action Executor + Element Extraction
+ * Uses chrome.debugger API for reliable browser automation.
+ * Hybrid mode: accessibility-tree refs (reliable) + vision coordinates (fallback).
+ */
+
+let attachedTabId = null;
+let elementMap = {};
+
+// ── Network Interception for Scraping ───────────────────────
+let capturedNetworkJson = [];  // Captured JSON API responses
+const MAX_NETWORK_CAPTURES = 50;
+
+// Track when Chrome auto-detaches the debugger (cross-origin navigation, tab close, etc.)
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId === attachedTabId) {
+    console.log(`Debugger auto-detached from tab ${source.tabId}: ${reason}`);
+    attachedTabId = null;
+    capturedNetworkJson = [];  // Clear captures on detach
+  }
+});
+
+// Listen for CDP events (network responses)
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (source.tabId !== attachedTabId) return;
+
+  if (method === "Network.responseReceived") {
+    const resp = params.response;
+    const contentType = resp.mimeType || resp.headers?.["content-type"] || "";
+    if (contentType.includes("json")) {
+      capturedNetworkJson.push({
+        requestId: params.requestId,
+        url: resp.url,
+        status: resp.status,
+        mimeType: contentType,
+        timestamp: Date.now(),
+      });
+      // Cap at max entries
+      if (capturedNetworkJson.length > MAX_NETWORK_CAPTURES) {
+        capturedNetworkJson = capturedNetworkJson.slice(-MAX_NETWORK_CAPTURES);
+      }
+    }
+  }
+
+  // Clear captures on main frame navigation (new page)
+  if (method === "Network.requestWillBeSent" && params.type === "Document" && params.frameId === params.loaderId) {
+    capturedNetworkJson = [];
+  }
+});
+
+// ── Debugger Management ─────────────────────────────────────
+
+async function attachDebugger(tabId) {
+  if (attachedTabId === tabId) return;
+  if (attachedTabId !== null) await detachDebugger();
+  await chrome.debugger.attach({ tabId }, "1.3");
+  attachedTabId = tabId;
+
+  // Enable network interception for JSON API capture
+  await sendCommand("Network.enable");
+  capturedNetworkJson = [];  // Fresh start
+
+  // Apply stealth patches to avoid anti-bot detection
+  await applyStealthPatches();
+}
+
+/**
+ * Inject stealth patches to mask CDP/debugger fingerprints.
+ * Runs before any page scripts via Page.addScriptToEvaluateOnNewDocument.
+ */
+async function applyStealthPatches() {
+  try {
+    await sendCommand("Page.enable");
+
+    // Inject stealth JS that runs before any page script on every navigation
+    await sendCommand("Page.addScriptToEvaluateOnNewDocument", {
+      source: `
+        // 1. Hide navigator.webdriver — must delete from prototype, not just override
+        // The "new" detection uses Object.getOwnPropertyDescriptor on Navigator.prototype
+        try {
+          // Delete the property from the prototype chain entirely
+          const proto = Navigator.prototype;
+          if ('webdriver' in proto) {
+            delete proto.webdriver;
+          }
+          // Also delete from the instance
+          if ('webdriver' in navigator) {
+            Object.defineProperty(navigator, 'webdriver', {
+              get: () => false,
+              configurable: true,
+              enumerable: true,
+            });
+          }
+          // Patch the prototype descriptor to look native
+          Object.defineProperty(proto, 'webdriver', {
+            get: () => false,
+            configurable: true,
+            enumerable: true,
+          });
+          // Make the getter look native (toString check)
+          const webdriverDesc = Object.getOwnPropertyDescriptor(proto, 'webdriver');
+          if (webdriverDesc && webdriverDesc.get) {
+            webdriverDesc.get.toString = () => 'function get webdriver() { [native code] }';
+          }
+        } catch(e) {}
+
+        // 2. Fix PluginArray instanceof check
+        // Chrome 91+ deprecated plugins but still returns a PluginArray-like object.
+        // The prototype chain may be broken, causing instanceof to fail.
+        try {
+          if (typeof PluginArray !== 'undefined') {
+            // Approach 1: Fix the prototype chain directly
+            const realPlugins = navigator.plugins;
+            if (realPlugins && !(realPlugins instanceof PluginArray)) {
+              try {
+                Object.setPrototypeOf(realPlugins, PluginArray.prototype);
+              } catch(e) {
+                // If setPrototypeOf fails (frozen object), patch Symbol.hasInstance
+                Object.defineProperty(PluginArray, Symbol.hasInstance, {
+                  value: (instance) => {
+                    if (instance === navigator.plugins) return true;
+                    try { return Object.getPrototypeOf(instance) === PluginArray.prototype; }
+                    catch(e) { return false; }
+                  },
+                  configurable: true,
+                });
+              }
+            }
+          }
+        } catch(e) {}
+
+        // 3. Fake languages
+        Object.defineProperty(navigator, 'languages', {
+          get: () => ['en-US', 'en'],
+          configurable: true,
+        });
+
+        // 4. Override permissions query to report "prompt" for notifications
+        const originalQuery = window.Notification && Notification.permission;
+        if (window.Notification) {
+          Notification.permission = 'default';
+        }
+
+        // 5. Fix chrome.runtime to not leak extension context
+        // (some anti-bot checks for chrome.runtime.id)
+        try {
+          if (window.chrome && window.chrome.runtime && window.chrome.runtime.id) {
+            // Already in extension context, leave it
+          }
+        } catch(e) {}
+
+        // 6. Prevent detection via Error stack traces containing "debugger"
+        const originalError = Error;
+        const patchedError = function(...args) {
+          const err = new originalError(...args);
+          const originalStack = err.stack;
+          if (originalStack) {
+            err.stack = originalStack
+              .split('\\n')
+              .filter(line => !line.includes('debugger'))
+              .join('\\n');
+          }
+          return err;
+        };
+        patchedError.prototype = originalError.prototype;
+        // Don't override globally as it breaks some sites
+
+        // 7. Add missing window.chrome properties that headless lacks
+        if (!window.chrome) window.chrome = {};
+        if (!window.chrome.app) {
+          window.chrome.app = {
+            isInstalled: false,
+            InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+            RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+          };
+        }
+
+        // 8. Fix WebGL vendor/renderer (headless has "Google Inc. (Google)" which is suspicious)
+        const getParameter = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(param) {
+          // UNMASKED_VENDOR_WEBGL
+          if (param === 37445) return 'Intel Inc.';
+          // UNMASKED_RENDERER_WEBGL
+          if (param === 37446) return 'Intel Iris OpenGL Engine';
+          return getParameter.call(this, param);
+        };
+
+        // 9. Spoof WebGL2 as well
+        if (typeof WebGL2RenderingContext !== 'undefined') {
+          const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+          WebGL2RenderingContext.prototype.getParameter = function(param) {
+            if (param === 37445) return 'Intel Inc.';
+            if (param === 37446) return 'Intel Iris OpenGL Engine';
+            return getParameter2.call(this, param);
+          };
+        }
+
+        // 10. Fix Permissions API to not leak automation
+        const originalPermissionsQuery = navigator.permissions?.query;
+        if (originalPermissionsQuery) {
+          navigator.permissions.query = function(params) {
+            if (params.name === 'notifications') {
+              return Promise.resolve({ state: Notification.permission || 'prompt' });
+            }
+            return originalPermissionsQuery.call(this, params);
+          };
+        }
+      `,
+    });
+
+    // Also patch the current page immediately
+    await sendCommand("Runtime.evaluate", {
+      expression: `
+        try {
+          const proto = Navigator.prototype;
+          Object.defineProperty(proto, 'webdriver', {
+            get: () => false, configurable: true, enumerable: true,
+          });
+        } catch(e) {}
+      `,
+    });
+
+  } catch (e) {
+    console.warn("Stealth patches failed (non-critical):", e);
+  }
+}
+
+async function detachDebugger() {
+  if (attachedTabId === null) return;
+  try {
+    await chrome.debugger.detach({ tabId: attachedTabId });
+  } catch (_) {}
+  attachedTabId = null;
+}
+
+/**
+ * Bound any promise by a timeout so a hung CDP command can't freeze the agent loop.
+ * If the underlying promise settles first, its value (or error) is returned.
+ * Otherwise the returned promise rejects with a timeout error after `ms`.
+ */
+function withTimeout(promise, ms, label = "operation") {
+  let timer = null;
+  const timeoutP = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms
+    );
+  });
+  return Promise.race([promise, timeoutP]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
+ * sendCommand with a hard timeout. CDP calls can hang when the target is
+ * mid-navigation or Chrome auto-detaches the debugger; without a bound,
+ * the whole agent loop can freeze because the promise never settles.
+ * Default 15s — generous enough for slow pages, short enough to recover.
+ */
+function sendCommand(method, params = {}, timeoutMs = 15_000) {
+  return withTimeout(
+    chrome.debugger.sendCommand({ tabId: attachedTabId }, method, params),
+    timeoutMs,
+    `CDP ${method}`
+  );
+}
+
+// ── Element Extraction ──────────────────────────────────────
+
+const EXTRACT_ELEMENTS_SCRIPT = `
+(() => {
+  // Phase 1: Find page landmarks for semantic grouping
+  const LANDMARK_SELECTORS = [
+    'nav', 'main', 'header', 'footer', 'aside', 'form',
+    '[role="navigation"]', '[role="search"]', '[role="main"]',
+    '[role="banner"]', '[role="form"]', '[role="dialog"]',
+    '[role="alertdialog"]', '[role="complementary"]',
+    '[role="contentinfo"]', '[role="region"]'
+  ];
+
+  const landmarkEls = [];
+  const landmarkSet = new Set();
+  document.querySelectorAll(LANDMARK_SELECTORS.join(',')).forEach(el => {
+    if (landmarkSet.has(el)) return;
+    landmarkSet.add(el);
+    const r = el.getBoundingClientRect();
+    if (r.width < 50 || r.height < 30) return;
+    const s = getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return;
+    landmarkEls.push({
+      element: el,
+      label: el.getAttribute('aria-label')
+        || el.getAttribute('role')
+        || el.tagName.toLowerCase()
+    });
+  });
+
+  function findGroup(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body) {
+      for (const lm of landmarkEls) {
+        if (lm.element === node) return lm.label;
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  // Phase 2: Extract interactive elements with group assignment
+  const SELECTORS = [
+    'a[href]', 'button', 'input', 'select', 'textarea',
+    '[role="button"]', '[role="link"]', '[role="tab"]',
+    '[role="menuitem"]', '[role="checkbox"]', '[role="radio"]',
+    '[role="switch"]', '[role="option"]', '[role="combobox"]',
+    '[role="searchbox"]', '[role="textbox"]', '[role="listbox"]',
+    '[role="menu"]',
+    '[onclick]', '[tabindex]:not([tabindex="-1"])',
+    'summary', 'details', 'label[for]',
+    'th[aria-sort]', '[contenteditable="true"]',
+    '[data-action]', '[data-click]'
+  ];
+
+  const seen = new Set();
+  const elements = [];
+
+  document.querySelectorAll(SELECTORS.join(',')).forEach(el => {
+    if (seen.has(el)) return;
+    seen.add(el);
+
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 5 || rect.height < 5) return;
+    if (rect.bottom < 0 || rect.top > window.innerHeight) return;
+    if (rect.right < 0 || rect.left > window.innerWidth) return;
+
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
+
+    const tag = el.tagName.toLowerCase();
+    const role = el.getAttribute('role') || tag;
+    const ariaLabel = el.getAttribute('aria-label') || '';
+    const placeholder = el.getAttribute('placeholder') || '';
+    const title = el.getAttribute('title') || '';
+    const text = (el.innerText || '').trim().substring(0, 80);
+    const type = el.getAttribute('type') || '';
+    const href = el.getAttribute('href') || '';
+    const value = (el.value || '').substring(0, 50);
+    const checked = el.checked;
+    const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+
+    let desc = ariaLabel || text || placeholder || title || (type ? type + ' input' : tag);
+
+    elements.push({
+      tag, role, desc, type,
+      href: href.substring(0, 120),
+      value,
+      checked: checked || undefined,
+      disabled: disabled || undefined,
+      group: findGroup(el),
+      rect: {
+        x: Math.round(rect.x),
+        y: Math.round(rect.y),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      }
+    });
+  });
+
+  // Detect scrollable containers
+  const scrollContainers = [];
+  const allEls = document.querySelectorAll('*');
+  for (let i = 0; i < allEls.length && scrollContainers.length < 10; i++) {
+    const el = allEls[i];
+    const s = getComputedStyle(el);
+    const oy = s.overflowY;
+    if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') &&
+        el.scrollHeight > el.clientHeight + 20) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 50 || r.height < 50) continue;
+      if (r.bottom < 0 || r.top > window.innerHeight) continue;
+
+      const tag = el.tagName.toLowerCase();
+      const id = el.id ? '#' + el.id : '';
+      const cls = el.className && typeof el.className === 'string'
+        ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.')
+        : '';
+      const ariaLabel = el.getAttribute('aria-label') || '';
+      const role = el.getAttribute('role') || '';
+      let label = ariaLabel || role || id || cls || tag;
+
+      scrollContainers.push({
+        label,
+        scrollTop: Math.round(el.scrollTop),
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight,
+        canScrollDown: el.scrollTop + el.clientHeight < el.scrollHeight - 5,
+        canScrollUp: el.scrollTop > 5,
+        rect: {
+          x: Math.round(r.x),
+          y: Math.round(r.y),
+          width: Math.round(r.width),
+          height: Math.round(r.height),
+        }
+      });
+    }
+  }
+
+  // Detect popups, modals, overlays, cookie banners
+  let popup = null;
+  const popupSelectors = [
+    '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]',
+    '.modal', '.popup', '.overlay', '.dialog',
+    '[class*="modal"]', '[class*="popup"]', '[class*="overlay"]',
+    '[class*="cookie"]', '[class*="consent"]', '[class*="banner"]',
+    '[id*="modal"]', '[id*="popup"]', '[id*="overlay"]',
+    '[id*="cookie"]', '[id*="consent"]'
+  ];
+
+  for (const sel of popupSelectors) {
+    const matches = document.querySelectorAll(sel);
+    for (const el of matches) {
+      const s = getComputedStyle(el);
+      if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 100 || r.height < 100) continue;
+
+      // Find close button within the popup
+      let closeBtn = null;
+      const closeCandidates = el.querySelectorAll(
+        'button[aria-label*="close" i], button[aria-label*="dismiss" i], ' +
+        'button[class*="close" i], button[class*="dismiss" i], ' +
+        '[role="button"][aria-label*="close" i], ' +
+        '.close, .dismiss, [data-dismiss], [aria-label="Close"]'
+      );
+
+      // Also check for X-like buttons (single character text)
+      if (closeCandidates.length === 0) {
+        el.querySelectorAll('button, [role="button"], [onclick]').forEach(btn => {
+          const txt = (btn.innerText || '').trim();
+          if (txt === 'X' || txt === 'x' || txt === '\u00D7' || txt === '\u2715' || txt === '\u2716') {
+            closeBtn = btn;
+          }
+        });
+      } else {
+        closeBtn = closeCandidates[0];
+      }
+
+      let closeBtnRect = null;
+      if (closeBtn) {
+        const cr = closeBtn.getBoundingClientRect();
+        closeBtnRect = {
+          x: Math.round(cr.x),
+          y: Math.round(cr.y),
+          width: Math.round(cr.width),
+          height: Math.round(cr.height),
+          centerX: Math.round(cr.x + cr.width / 2),
+          centerY: Math.round(cr.y + cr.height / 2),
+        };
+      }
+
+      popup = {
+        type: el.getAttribute('role') || 'popup',
+        rect: {
+          x: Math.round(r.x),
+          y: Math.round(r.y),
+          width: Math.round(r.width),
+          height: Math.round(r.height),
+        },
+        closeButton: closeBtnRect,
+      };
+      break;
+    }
+    if (popup) break;
+  }
+
+  // Detect CAPTCHAs, Turnstile, reCAPTCHA — with live click coordinates
+  let captcha = null;
+
+  // 1. Cloudflare Turnstile — iframe from challenges.cloudflare.com
+  const turnstileFrames = document.querySelectorAll(
+    'iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], .cf-turnstile iframe'
+  );
+  for (const frame of turnstileFrames) {
+    const r = frame.getBoundingClientRect();
+    if (r.width > 10 && r.height > 10) {
+      // The checkbox is typically ~30px from left edge, vertically centered
+      captcha = {
+        type: 'Cloudflare Turnstile',
+        rect: { x: Math.round(r.x), y: Math.round(r.y),
+                width: Math.round(r.width), height: Math.round(r.height) },
+        clickTarget: {
+          x: Math.round(r.x + 30),
+          y: Math.round(r.y + r.height / 2),
+          note: 'Checkbox is ~30px from left, vertically centered in iframe'
+        }
+      };
+      break;
+    }
+  }
+
+  // 2. Cloudflare Turnstile container (when iframe not yet loaded)
+  if (!captcha) {
+    const turnstileDiv = document.querySelector('.cf-turnstile, [data-sitekey][data-appearance]');
+    if (turnstileDiv) {
+      const r = turnstileDiv.getBoundingClientRect();
+      if (r.width > 10 && r.height > 10) {
+        // Find the iframe inside
+        const innerFrame = turnstileDiv.querySelector('iframe');
+        if (innerFrame) {
+          const ir = innerFrame.getBoundingClientRect();
+          captcha = {
+            type: 'Cloudflare Turnstile',
+            rect: { x: Math.round(ir.x), y: Math.round(ir.y),
+                    width: Math.round(ir.width), height: Math.round(ir.height) },
+            clickTarget: {
+              x: Math.round(ir.x + 30),
+              y: Math.round(ir.y + ir.height / 2),
+            }
+          };
+        } else {
+          captcha = {
+            type: 'Cloudflare Turnstile (loading)',
+            rect: { x: Math.round(r.x), y: Math.round(r.y),
+                    width: Math.round(r.width), height: Math.round(r.height) },
+            clickTarget: {
+              x: Math.round(r.x + 30),
+              y: Math.round(r.y + r.height / 2),
+            }
+          };
+        }
+      }
+    }
+  }
+
+  // 3. reCAPTCHA v2 checkbox ("I'm not a robot")
+  if (!captcha) {
+    const recaptchaFrame = document.querySelector('iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/enterprise/anchor"]');
+    if (recaptchaFrame) {
+      const r = recaptchaFrame.getBoundingClientRect();
+      if (r.width > 10 && r.height > 10) {
+        // The checkbox is ~28px from left, vertically centered
+        captcha = {
+          type: 'reCAPTCHA v2',
+          rect: { x: Math.round(r.x), y: Math.round(r.y),
+                  width: Math.round(r.width), height: Math.round(r.height) },
+          clickTarget: {
+            x: Math.round(r.x + 28),
+            y: Math.round(r.y + r.height / 2),
+            note: 'Checkbox is ~28px from left in iframe'
+          }
+        };
+      }
+    }
+  }
+
+  // 4. hCaptcha checkbox
+  if (!captcha) {
+    const hcaptchaFrame = document.querySelector('iframe[src*="hcaptcha.com/captcha"]');
+    if (hcaptchaFrame) {
+      const r = hcaptchaFrame.getBoundingClientRect();
+      if (r.width > 10 && r.height > 10) {
+        captcha = {
+          type: 'hCaptcha',
+          rect: { x: Math.round(r.x), y: Math.round(r.y),
+                  width: Math.round(r.width), height: Math.round(r.height) },
+          clickTarget: {
+            x: Math.round(r.x + 28),
+            y: Math.round(r.y + r.height / 2),
+          }
+        };
+      }
+    }
+  }
+
+  // 5. Generic CAPTCHA (text-based, image-based)
+  if (!captcha) {
+    const genericSelectors = [
+      '[class*="captcha" i]', '[id*="captcha" i]',
+      '[data-sitekey]', '#captcha'
+    ];
+    for (const sel of genericSelectors) {
+      const el = document.querySelector(sel);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 10 && r.height > 10) {
+          captcha = {
+            type: 'CAPTCHA',
+            rect: { x: Math.round(r.x), y: Math.round(r.y),
+                    width: Math.round(r.width), height: Math.round(r.height) }
+          };
+          break;
+        }
+      }
+    }
+  }
+
+  // Detect iframes with visible content (may contain interactive elements)
+  const iframes = [];
+  document.querySelectorAll('iframe').forEach(f => {
+    const r = f.getBoundingClientRect();
+    if (r.width < 50 || r.height < 50) return;
+    if (r.bottom < 0 || r.top > window.innerHeight) return;
+    const src = f.src || f.getAttribute('src') || '';
+    if (src.includes('recaptcha') || src.includes('captcha')) return; // skip CAPTCHA frames
+    iframes.push({
+      src: src.substring(0, 120),
+      rect: { x: Math.round(r.x), y: Math.round(r.y),
+              width: Math.round(r.width), height: Math.round(r.height) }
+    });
+  });
+
+  let canvasArea = 0;
+  document.querySelectorAll('canvas').forEach(c => {
+    const r = c.getBoundingClientRect();
+    canvasArea += r.width * r.height;
+  });
+  const viewportArea = window.innerWidth * window.innerHeight;
+  const isCanvasHeavy = canvasArea > viewportArea * 0.5;
+
+  // Page scroll position
+  const docHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+  const viewHeight = window.innerHeight;
+  const scrollTop = window.scrollY || document.documentElement.scrollTop;
+  const scrollPct = docHeight > viewHeight ? Math.round(scrollTop / (docHeight - viewHeight) * 100) : 0;
+
+  // Page loading state
+  const readyState = document.readyState; // "loading", "interactive", "complete"
+  const isLoading = readyState !== 'complete';
+
+  return JSON.stringify({
+    elements,
+    scrollContainers,
+    popup,
+    captcha,
+    iframes: iframes.length > 0 ? iframes : undefined,
+    isCanvasHeavy,
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    pageLoading: isLoading,
+    pageScroll: {
+      scrollTop: Math.round(scrollTop),
+      scrollPct,
+      docHeight: Math.round(docHeight),
+      canScrollDown: scrollTop + viewHeight < docHeight - 10,
+      canScrollUp: scrollTop > 10,
+    }
+  });
+})()
+`;
+
+async function extractElements(tabId) {
+  await attachDebugger(tabId);
+
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: EXTRACT_ELEMENTS_SCRIPT,
+    returnByValue: true,
+  });
+
+  const data = JSON.parse(result.result.value);
+
+  elementMap = {};
+  data.elements.forEach((el, i) => {
+    elementMap[i] = {
+      centerX: Math.round(el.rect.x + el.rect.width / 2),
+      centerY: Math.round(el.rect.y + el.rect.height / 2),
+      rect: el.rect,
+    };
+  });
+
+  return data;
+}
+
+function resolveRef(ref) {
+  const el = elementMap[ref];
+  if (!el) return null;
+  return { x: el.centerX, y: el.centerY };
+}
+
+// ── CDP Primitives ──────────────────────────────────────────
+
+async function cdpMoveMouse(x, y) {
+  await sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
+}
+
+async function cdpClick(x, y) {
+  await cdpMoveMouse(x, y);
+  await sleep(50);
+  await sendCommand("Input.dispatchMouseEvent", {
+    type: "mousePressed", x, y, button: "left", clickCount: 1,
+  });
+  await sendCommand("Input.dispatchMouseEvent", {
+    type: "mouseReleased", x, y, button: "left", clickCount: 1,
+  });
+}
+
+async function cdpDoubleClick(x, y) {
+  await cdpMoveMouse(x, y);
+  await sleep(50);
+  await sendCommand("Input.dispatchMouseEvent", {
+    type: "mousePressed", x, y, button: "left", clickCount: 1,
+  });
+  await sendCommand("Input.dispatchMouseEvent", {
+    type: "mouseReleased", x, y, button: "left", clickCount: 1,
+  });
+  await sleep(50);
+  await sendCommand("Input.dispatchMouseEvent", {
+    type: "mousePressed", x, y, button: "left", clickCount: 2,
+  });
+  await sendCommand("Input.dispatchMouseEvent", {
+    type: "mouseReleased", x, y, button: "left", clickCount: 2,
+  });
+}
+
+async function cdpType(text) {
+  for (const char of text) {
+    // Convert \n and \r to Enter keypress, \t to Tab keypress
+    if (char === "\n" || char === "\r") {
+      await cdpKey("Enter");
+      await sleep(30 + Math.random() * 40);
+      continue;
+    }
+    if (char === "\t") {
+      await cdpKey("Tab");
+      await sleep(30 + Math.random() * 40);
+      continue;
+    }
+    await sendCommand("Input.dispatchKeyEvent", {
+      type: "keyDown", text: char, key: char, unmodifiedText: char,
+    });
+    await sendCommand("Input.dispatchKeyEvent", {
+      type: "keyUp", key: char,
+    });
+    await sleep(30 + Math.random() * 40);
+  }
+}
+
+async function cdpKey(key) {
+  const keyMap = {
+    Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 },
+    Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
+    Escape: { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 },
+    Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
+    Delete: { key: "Delete", code: "Delete", windowsVirtualKeyCode: 46 },
+    Space: { key: " ", code: "Space", windowsVirtualKeyCode: 32 },
+    ArrowUp: { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+    ArrowDown: { key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 },
+    ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", windowsVirtualKeyCode: 37 },
+    ArrowRight: { key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 },
+    Home: { key: "Home", code: "Home", windowsVirtualKeyCode: 36 },
+    End: { key: "End", code: "End", windowsVirtualKeyCode: 35 },
+    PageUp: { key: "PageUp", code: "PageUp", windowsVirtualKeyCode: 33 },
+    PageDown: { key: "PageDown", code: "PageDown", windowsVirtualKeyCode: 34 },
+  };
+
+  const mapped = keyMap[key];
+  if (!mapped) {
+    console.warn(`Unknown key: ${key}`);
+    return;
+  }
+
+  await sendCommand("Input.dispatchKeyEvent", { type: "keyDown", ...mapped });
+  await sendCommand("Input.dispatchKeyEvent", { type: "keyUp", ...mapped });
+}
+
+async function cdpSelectAll() {
+  // Ctrl+A / Cmd+A to select all text
+  const modifier = navigator.platform.includes("Mac") ? 2 : 4; // 2=ctrl on mac via CDP, 4=ctrl
+  await sendCommand("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "a",
+    code: "KeyA",
+    windowsVirtualKeyCode: 65,
+    modifiers: modifier,
+  });
+  await sendCommand("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "a",
+    code: "KeyA",
+    windowsVirtualKeyCode: 65,
+    modifiers: modifier,
+  });
+}
+
+async function cdpScroll(x, y, deltaX, deltaY) {
+  await sendCommand("Input.dispatchMouseEvent", {
+    type: "mouseWheel", x, y, deltaX, deltaY,
+  });
+}
+
+/**
+ * Wait (with timeout) for Page.loadEventFired. This lets callers observe
+ * that the target has finished its main-frame load before issuing more
+ * CDP commands against it.
+ */
+function waitForPageLoad(timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try { chrome.debugger.onEvent.removeListener(listener); } catch (_) {}
+      resolve();
+    };
+    const listener = (source, method) => {
+      if (source.tabId !== attachedTabId) return;
+      if (method === "Page.loadEventFired" || method === "Page.frameStoppedLoading") {
+        finish();
+      }
+    };
+    chrome.debugger.onEvent.addListener(listener);
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+/**
+ * Navigate the attached tab and wait for the main-frame load event before
+ * returning. Bounded at 8s — if the page never fires load (slow SPAs), we
+ * proceed anyway and let the next waitForPageReady smooth it out.
+ */
+async function cdpNavigate(url) {
+  // Make sure Page events are enabled so loadEventFired is delivered to us.
+  try { await sendCommand("Page.enable"); } catch (_) {}
+  const loadP = waitForPageLoad(8000);
+  await sendCommand("Page.navigate", { url });
+  await loadP;
+}
+
+async function cdpGoBack() {
+  await sendCommand("Page.navigate", {
+    url: "javascript:history.back()",
+  });
+  // Use Runtime.evaluate as fallback
+  await sendCommand("Runtime.evaluate", {
+    expression: "history.back()",
+  });
+}
+
+async function cdpGoForward() {
+  await sendCommand("Runtime.evaluate", {
+    expression: "history.forward()",
+  });
+}
+
+async function cdpExtractText(ref) {
+  const coords = resolveRef(ref);
+  if (!coords) return "(element not found)";
+
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: `
+      (() => {
+        const el = document.elementFromPoint(${coords.x}, ${coords.y});
+        return el ? el.innerText || el.textContent || '' : '(no element at point)';
+      })()
+    `,
+    returnByValue: true,
+  });
+  return result.result.value || "(empty)";
+}
+
+// ── Scraping CDP Functions ──────────────────────────────────
+
+const API_BASE_ACTIONS = "http://localhost:8000";
+
+async function cdpScrapePageHtml() {
+  // Grab the full rendered HTML, send to backend for BS4 + markdownify parsing
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: "document.documentElement.outerHTML",
+    returnByValue: true,
+  });
+  const html = result.result.value;
+  if (!html) return JSON.stringify({ error: "Could not get page HTML" });
+
+  try {
+    const resp = await fetch(`${API_BASE_ACTIONS}/scrape/page`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html }),
+    });
+    const data = await resp.json();
+    return JSON.stringify(data, null, 2);
+  } catch (err) {
+    return JSON.stringify({ error: `Scrape endpoint failed: ${err.message}` });
+  }
+}
+
+async function cdpScrapeTableHtml(ref) {
+  // Find the table element (by ref or first <table>), extract its HTML, send to backend
+  let expression;
+  if (ref !== undefined && ref !== null) {
+    const coords = resolveRef(ref);
+    if (coords) {
+      expression = `
+        (() => {
+          let el = document.elementFromPoint(${coords.x}, ${coords.y});
+          // Walk up to find nearest table
+          while (el && el.tagName !== 'TABLE') el = el.parentElement;
+          if (!el) {
+            // Fallback: find closest table in DOM
+            const allTables = document.querySelectorAll('table');
+            el = allTables.length > 0 ? allTables[0] : null;
+          }
+          return el ? el.outerHTML : null;
+        })()
+      `;
+    } else {
+      expression = `
+        (() => {
+          const t = document.querySelector('table');
+          return t ? t.outerHTML : null;
+        })()
+      `;
+    }
+  } else {
+    expression = `
+      (() => {
+        const t = document.querySelector('table');
+        return t ? t.outerHTML : null;
+      })()
+    `;
+  }
+
+  const result = await sendCommand("Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+  });
+  const tableHtml = result.result.value;
+  if (!tableHtml) return JSON.stringify({ error: "No table found on page" });
+
+  try {
+    const resp = await fetch(`${API_BASE_ACTIONS}/scrape/table`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ html: tableHtml }),
+    });
+    const data = await resp.json();
+    return JSON.stringify(data, null, 2);
+  } catch (err) {
+    return JSON.stringify({ error: `Table scrape failed: ${err.message}` });
+  }
+}
+
+async function cdpScrapeLinks() {
+  // Extract all links from page — runs entirely in page context
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: `
+      (() => {
+        const seen = new Set();
+        const links = [];
+        const baseUrl = document.baseURI || location.href;
+        for (const a of document.querySelectorAll('a[href]')) {
+          const href = a.href;
+          if (!href || href.startsWith('javascript:') || href === '#' || seen.has(href)) continue;
+          seen.add(href);
+          const text = (a.innerText || a.textContent || '').trim().substring(0, 100);
+          if (!text) continue;
+          // Get context from parent paragraph/list item
+          const parent = a.closest('p, li, td, div, span');
+          const context = parent
+            ? (parent.innerText || '').trim().substring(0, 150)
+            : '';
+          links.push({ text, href, context });
+          if (links.length >= 200) break;
+        }
+        return JSON.stringify({
+          links,
+          count: links.length,
+          truncated: document.querySelectorAll('a[href]').length > 200,
+        });
+      })()
+    `,
+    returnByValue: true,
+  });
+  return result.result.value || JSON.stringify({ links: [], count: 0 });
+}
+
+async function cdpScrapeMetadata() {
+  // Extract page metadata — runs entirely in page context
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: `
+      (() => {
+        const meta = {};
+        const getMeta = (sel, attr = 'content') => {
+          const el = document.querySelector(sel);
+          return el ? (el.getAttribute(attr) || '').trim() : '';
+        };
+
+        meta.title = document.title || '';
+        meta.description = getMeta('meta[name="description"]');
+        meta.author = getMeta('meta[name="author"]');
+        meta.robots = getMeta('meta[name="robots"]');
+
+        // Open Graph (Firecrawl-style comprehensive extraction)
+        meta.og_title = getMeta('meta[property="og:title"]');
+        meta.og_description = getMeta('meta[property="og:description"]');
+        meta.og_image = getMeta('meta[property="og:image"]');
+        meta.og_url = getMeta('meta[property="og:url"]');
+        meta.og_type = getMeta('meta[property="og:type"]');
+        meta.og_site_name = getMeta('meta[property="og:site_name"]');
+
+        // Article metadata
+        meta.published_time = getMeta('meta[property="article:published_time"]')
+          || getMeta('meta[name="date"]')
+          || getMeta('time[datetime]', 'datetime');
+        meta.modified_time = getMeta('meta[property="article:modified_time"]');
+
+        // Technical
+        meta.canonical = getMeta('link[rel="canonical"]', 'href');
+        meta.language = document.documentElement.lang || getMeta('meta[http-equiv="content-language"]');
+        meta.favicon = getMeta('link[rel="icon"]', 'href')
+          || getMeta('link[rel="shortcut icon"]', 'href');
+
+        // Title fallback chain (like Firecrawl)
+        if (!meta.title) {
+          meta.title = meta.og_title
+            || getMeta('meta[name="twitter:title"]')
+            || getMeta('meta[name="title"]')
+            || '';
+        }
+
+        // Remove empty fields
+        for (const key of Object.keys(meta)) {
+          if (!meta[key]) delete meta[key];
+        }
+
+        return JSON.stringify(meta);
+      })()
+    `,
+    returnByValue: true,
+  });
+  return result.result.value || JSON.stringify({});
+}
+
+async function cdpScrapeNetwork() {
+  // Retrieve captured JSON API responses
+  const results = [];
+  let totalSize = 0;
+  const MAX_TOTAL = 10000;
+  const MAX_PER_BODY = 3000;
+
+  for (const entry of capturedNetworkJson) {
+    if (totalSize > MAX_TOTAL) break;
+    try {
+      const bodyResult = await sendCommand("Network.getResponseBody", {
+        requestId: entry.requestId,
+      });
+      let body = bodyResult.body || "";
+      if (body.length > MAX_PER_BODY) {
+        body = body.substring(0, MAX_PER_BODY) + "... [truncated]";
+      }
+      results.push({
+        url: entry.url,
+        status: entry.status,
+        body,
+      });
+      totalSize += body.length;
+    } catch (_) {
+      // Body may have been discarded by Chrome
+      results.push({
+        url: entry.url,
+        status: entry.status,
+        body: "(body unavailable)",
+      });
+    }
+  }
+
+  return JSON.stringify({
+    requests: results,
+    count: results.length,
+    totalCaptured: capturedNetworkJson.length,
+  }, null, 2);
+}
+
+
+async function cdpSelectOption(ref, value) {
+  // Use Runtime.evaluate to set the select value and dispatch change event
+  const coords = resolveRef(ref);
+  if (!coords) return;
+
+  await sendCommand("Runtime.evaluate", {
+    expression: `
+      (() => {
+        const el = document.elementFromPoint(${coords.x}, ${coords.y});
+        if (el && el.tagName === 'SELECT') {
+          el.value = ${JSON.stringify(value)};
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+        // Try matching by visible text
+        if (el && el.tagName === 'SELECT') {
+          for (const opt of el.options) {
+            if (opt.text.includes(${JSON.stringify(value)})) {
+              el.value = opt.value;
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            }
+          }
+        }
+        return false;
+      })()
+    `,
+    returnByValue: true,
+  });
+}
+
+// ── Action Executor ─────────────────────────────────────────
+
+/**
+ * Find and click a CAPTCHA checkbox (Turnstile/reCAPTCHA/hCaptcha) in real-time.
+ * Gets the iframe's CURRENT position each call — handles position shifts.
+ */
+async function cdpClickCaptcha() {
+  // Find the captcha iframe's current position via JS
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: `
+      (() => {
+        // Try Turnstile first
+        let frame = document.querySelector(
+          'iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"], .cf-turnstile iframe'
+        );
+        if (frame) {
+          const r = frame.getBoundingClientRect();
+          if (r.width > 10 && r.height > 10) {
+            return JSON.stringify({
+              type: 'turnstile',
+              x: Math.round(r.x + 30),
+              y: Math.round(r.y + r.height / 2),
+              iframeRect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+            });
+          }
+        }
+
+        // Try reCAPTCHA
+        frame = document.querySelector('iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/enterprise/anchor"]');
+        if (frame) {
+          const r = frame.getBoundingClientRect();
+          if (r.width > 10 && r.height > 10) {
+            return JSON.stringify({
+              type: 'recaptcha',
+              x: Math.round(r.x + 28),
+              y: Math.round(r.y + r.height / 2),
+              iframeRect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+            });
+          }
+        }
+
+        // Try hCaptcha
+        frame = document.querySelector('iframe[src*="hcaptcha.com"]');
+        if (frame) {
+          const r = frame.getBoundingClientRect();
+          if (r.width > 10 && r.height > 10) {
+            return JSON.stringify({
+              type: 'hcaptcha',
+              x: Math.round(r.x + 28),
+              y: Math.round(r.y + r.height / 2),
+              iframeRect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+            });
+          }
+        }
+
+        return JSON.stringify({ type: 'not_found' });
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  const info = JSON.parse(result.result.value);
+  if (info.type === 'not_found') {
+    return { success: false, reason: 'No CAPTCHA iframe found' };
+  }
+
+  // Move mouse naturally to the click target, then click
+  // Add small random offset to seem more human
+  const jitterX = Math.round((Math.random() - 0.5) * 6);
+  const jitterY = Math.round((Math.random() - 0.5) * 6);
+  const clickX = info.x + jitterX;
+  const clickY = info.y + jitterY;
+
+  // Human-like: move mouse in steps toward target
+  const startX = clickX + Math.round((Math.random() - 0.5) * 100);
+  const startY = clickY + Math.round((Math.random() - 0.5) * 100);
+  const steps = 5 + Math.round(Math.random() * 5);
+
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const mx = Math.round(startX + (clickX - startX) * t);
+    const my = Math.round(startY + (clickY - startY) * t);
+    await sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: mx, y: my });
+    await sleep(20 + Math.random() * 30);
+  }
+
+  // Click
+  await sleep(100 + Math.random() * 200);
+  await sendCommand("Input.dispatchMouseEvent", {
+    type: "mousePressed", x: clickX, y: clickY, button: "left", clickCount: 1,
+  });
+  await sleep(50 + Math.random() * 80);
+  await sendCommand("Input.dispatchMouseEvent", {
+    type: "mouseReleased", x: clickX, y: clickY, button: "left", clickCount: 1,
+  });
+
+  return { success: true, type: info.type, clickedAt: { x: clickX, y: clickY } };
+}
+
+/**
+ * Aggressively try to dismiss a popup/modal using multiple strategies via JS.
+ * Returns true if something was dismissed.
+ */
+async function cdpDismissPopup() {
+  const result = await sendCommand("Runtime.evaluate", {
+    expression: `
+      (() => {
+        // Strategy 1: Click close/dismiss buttons
+        const closeSelectors = [
+          'button[aria-label*="close" i]', 'button[aria-label*="dismiss" i]',
+          'button[class*="close" i]', 'button[class*="dismiss" i]',
+          '.close', '.dismiss', '[data-dismiss]', '[aria-label="Close"]',
+          'button[title*="close" i]', 'button[title*="dismiss" i]',
+          '.modal-close', '.popup-close', '.dialog-close',
+          '[class*="modal"] button', '[class*="popup"] button',
+          '[role="dialog"] button[class*="close" i]',
+          '[role="dialog"] button:first-of-type'
+        ];
+
+        for (const sel of closeSelectors) {
+          const btns = document.querySelectorAll(sel);
+          for (const btn of btns) {
+            const s = getComputedStyle(btn);
+            if (s.display === 'none' || s.visibility === 'hidden') continue;
+            const r = btn.getBoundingClientRect();
+            if (r.width < 5 || r.height < 5) continue;
+            // Check if it looks like a close button (small, or has X-like text)
+            const txt = (btn.innerText || btn.textContent || '').trim();
+            if (txt === 'X' || txt === 'x' || txt === '\\u00D7' || txt === '\\u2715' ||
+                txt === '' || txt.toLowerCase().includes('close') ||
+                txt.toLowerCase().includes('dismiss') ||
+                txt.toLowerCase().includes('no') ||
+                txt.toLowerCase().includes('later') ||
+                txt.toLowerCase().includes('cancel') ||
+                txt.toLowerCase().includes('got it') ||
+                txt.toLowerCase().includes('ok') ||
+                btn.querySelector('svg')) {
+              btn.click();
+              return 'clicked_close_button';
+            }
+          }
+        }
+
+        // Strategy 2: Find and click any button inside modals/dialogs
+        const modalBtns = document.querySelectorAll(
+          '[role="dialog"] button, [class*="modal"] button, [class*="popup"] button'
+        );
+        for (const btn of modalBtns) {
+          const s = getComputedStyle(btn);
+          if (s.display === 'none') continue;
+          const txt = (btn.innerText || '').trim().toLowerCase();
+          if (txt.includes('no') || txt.includes('later') || txt.includes('cancel') ||
+              txt.includes('close') || txt.includes('dismiss') || txt.includes('skip')) {
+            btn.click();
+            return 'clicked_dismiss_in_modal';
+          }
+        }
+
+        // Strategy 3: Remove overlay elements from DOM
+        const overlaySelectors = [
+          '[class*="overlay" i]', '[class*="backdrop" i]', '[class*="mask" i]',
+          '.modal-backdrop', '.popup-overlay'
+        ];
+        for (const sel of overlaySelectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            const s = getComputedStyle(el);
+            const r = el.getBoundingClientRect();
+            if (r.width > window.innerWidth * 0.5 && r.height > window.innerHeight * 0.5) {
+              el.style.display = 'none';
+              return 'hid_overlay';
+            }
+          }
+        }
+
+        // Strategy 4: Hide modals/dialogs directly
+        const modals = document.querySelectorAll(
+          '[role="dialog"], [aria-modal="true"], [class*="modal" i][class*="show" i]'
+        );
+        for (const m of modals) {
+          const s = getComputedStyle(m);
+          if (s.display !== 'none') {
+            m.style.display = 'none';
+            return 'hid_modal';
+          }
+        }
+
+        // Strategy 5: Re-enable scrolling on body
+        document.body.style.overflow = '';
+        document.documentElement.style.overflow = '';
+
+        return 'no_popup_found';
+      })()
+    `,
+    returnByValue: true,
+  });
+  return result.result.value || "failed";
+}
+
+async function executeAction(tabId, action) {
+  await attachDebugger(tabId);
+
+  // Helper to resolve ref or use raw coordinates
+  function getCoords(act) {
+    if (act.ref !== undefined) {
+      const c = resolveRef(act.ref);
+      if (!c) {
+        console.warn(`Element ref ${act.ref} not found`);
+        return null;
+      }
+      return c;
+    }
+    return { x: act.x, y: act.y };
+  }
+
+  switch (action.type) {
+    case "click": {
+      const c = getCoords(action);
+      if (c) {
+        await cdpClick(c.x, c.y);
+      }
+      break;
+    }
+
+    case "double_click": {
+      const c = getCoords(action);
+      if (c) {
+        await cdpDoubleClick(c.x, c.y);
+      }
+      break;
+    }
+
+    case "hover": {
+      const c = getCoords(action);
+      if (c) {
+        await cdpMoveMouse(c.x, c.y);
+      }
+      break;
+    }
+
+    case "type":
+      await cdpType(action.text);
+      break;
+
+    case "focus_and_type": {
+      const c = getCoords(action);
+      if (c) {
+        await cdpClick(c.x, c.y);
+        await sleep(100); // Minimal wait for focus
+
+        // Default: always clear unless explicitly set to false
+        // This prevents text appending to existing content
+        const shouldClear = action.clear !== false;
+        if (shouldClear) {
+          await cdpSelectAll();
+          await cdpKey("Backspace");
+          await sleep(50);
+        }
+        await cdpType(action.text);
+
+        // Auto-submit: press Enter after typing if requested (like Gemini's press_enter)
+        if (action.submit) {
+          await sleep(50);
+          await cdpKey("Enter");
+        }
+
+        // Read back the value to verify what's actually in the field
+        await sleep(50);
+        try {
+          const readback = await sendCommand("Runtime.evaluate", {
+            expression: `(() => {
+              const el = document.activeElement;
+              return el ? (el.value || el.innerText || '').substring(0, 200) : '';
+            })()`,
+            returnByValue: true,
+          });
+          const actualValue = readback.result.value || "";
+          action._inputVerification = {
+            intended: action.text,
+            actual: actualValue,
+            match: actualValue.includes(action.text),
+          };
+          if (!actualValue.includes(action.text)) {
+            console.warn(`Input mismatch: intended="${action.text}" actual="${actualValue}"`);
+          }
+        } catch (_) {}
+      }
+      break;
+    }
+
+    case "clear_and_type":
+      await cdpSelectAll();
+      await cdpKey("Backspace");
+      await cdpType(action.text);
+      break;
+
+    case "key":
+      await cdpKey(action.key);
+      break;
+
+    case "key_combo": {
+      // Key combination support (e.g., "Control+a", "Control+c", "Shift+Tab")
+      const keys = (action.keys || "").split("+").map(k => k.trim());
+      if (keys.length >= 2) {
+        const modifiers = [];
+        let mainKey = keys[keys.length - 1]; // Last key is the main key
+
+        for (let i = 0; i < keys.length - 1; i++) {
+          const mod = keys[i].toLowerCase();
+          if (mod === "control" || mod === "ctrl") modifiers.push("control");
+          else if (mod === "shift") modifiers.push("shift");
+          else if (mod === "alt") modifiers.push("alt");
+          else if (mod === "meta" || mod === "command" || mod === "cmd") modifiers.push("meta");
+        }
+
+        // Map key names to CDP key codes
+        const keyMap = {
+          a: { key: "a", code: "KeyA" }, c: { key: "c", code: "KeyC" },
+          v: { key: "v", code: "KeyV" }, x: { key: "x", code: "KeyX" },
+          z: { key: "z", code: "KeyZ" }, tab: { key: "Tab", code: "Tab" },
+          enter: { key: "Enter", code: "Enter" },
+        };
+
+        const mapped = keyMap[mainKey.toLowerCase()] || { key: mainKey, code: `Key${mainKey.toUpperCase()}` };
+        const modBitmask = (modifiers.includes("alt") ? 1 : 0) |
+                           (modifiers.includes("control") ? 2 : 0) |
+                           (modifiers.includes("meta") ? 4 : 0) |
+                           (modifiers.includes("shift") ? 8 : 0);
+
+        await sendCommand("Input.dispatchKeyEvent", {
+          type: "keyDown", key: mapped.key, code: mapped.code, modifiers: modBitmask,
+        });
+        await sendCommand("Input.dispatchKeyEvent", {
+          type: "keyUp", key: mapped.key, code: mapped.code, modifiers: modBitmask,
+        });
+      }
+      break;
+    }
+
+    case "select":
+      await cdpSelectOption(action.ref, action.value);
+      break;
+
+    case "scroll": {
+      // If model sends (0,0) or no coordinates, scroll at viewport center
+      let sx = action.x;
+      let sy = action.y;
+      if ((!sx && !sy) || (sx === 0 && sy === 0)) {
+        // Get viewport size and use center
+        try {
+          const vpResult = await sendCommand("Runtime.evaluate", {
+            expression: "JSON.stringify({w: window.innerWidth, h: window.innerHeight})",
+            returnByValue: true,
+          });
+          const vp = JSON.parse(vpResult.result.value);
+          sx = Math.round(vp.w / 2);
+          sy = Math.round(vp.h / 2);
+        } catch (_) {
+          sx = 640;
+          sy = 400;
+        }
+      }
+      await cdpScroll(sx, sy, action.deltaX || 0, action.deltaY || 0);
+      break;
+    }
+
+    case "navigate":
+      await cdpNavigate(action.url);
+      break;
+
+    case "back":
+      await cdpGoBack();
+      break;
+
+    case "forward":
+      await cdpGoForward();
+      break;
+
+    case "extract_text": {
+      const text = await cdpExtractText(action.ref);
+      action._extractedText = text;
+      action._scrapedData = text;  // Also expose via unified scrape interface
+      break;
+    }
+
+    // ── Fill Cells (Spreadsheet data entry) ──
+    case "fill_cells": {
+      const startCell = action.startCell || "A1";
+      const values = action.values || [];
+      const direction = action.direction || "down"; // "down" = Enter, "right" = Tab
+      const advanceKey = direction === "right" ? "Tab" : "Enter";
+
+      if (values.length === 0) break;
+
+      // Step 1: Navigate to start cell using Name Box
+      // The Name Box is typically the first input-like element at the top-left
+      // In Google Sheets, we use keyboard shortcut Ctrl+G or click the Name Box
+      // Safest: use the Name Box — click it, type cell ref, press Enter
+      try {
+        // Navigate to start cell using the Name Box
+        // Strategy: try DOM selectors first, then fall back to fixed coordinates
+        const nameBoxResult = await sendCommand("Runtime.evaluate", {
+          expression: `
+            (() => {
+              // Google Sheets Name Box — try multiple selectors
+              const selectors = [
+                'input[aria-label="Name Box"]',
+                'input.jfk-textinput',
+                '#A2\\\\:R1',
+                '[data-tooltip="Name box"]',
+                'input[maxlength]',
+              ];
+              for (const sel of selectors) {
+                try {
+                  const el = document.querySelector(sel);
+                  if (el && el.tagName === 'INPUT') {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 20 && rect.width < 200 && rect.y < 200) {
+                      return JSON.stringify({ x: rect.x + rect.width/2, y: rect.y + rect.height/2, found: true, selector: sel });
+                    }
+                  }
+                } catch(_) {}
+              }
+              // Fallback: scan all small inputs near top-left
+              for (const inp of document.querySelectorAll('input')) {
+                const r = inp.getBoundingClientRect();
+                if (r.y < 180 && r.x < 150 && r.width > 30 && r.width < 200) {
+                  return JSON.stringify({ x: r.x + r.width/2, y: r.y + r.height/2, found: true, selector: 'scan' });
+                }
+              }
+              return JSON.stringify({ found: false });
+            })()
+          `,
+          returnByValue: true,
+        });
+        const nameBox = JSON.parse(nameBoxResult.result.value);
+
+        if (nameBox.found) {
+          console.log(`Name Box found via: ${nameBox.selector} at (${nameBox.x}, ${nameBox.y})`);
+          await cdpClick(nameBox.x, nameBox.y);
+          await sleep(150);
+          await cdpSelectAll();
+          await cdpKey("Backspace");
+          await sleep(50);
+          // Type cell reference WITHOUT \n — we press Enter separately
+          for (const ch of startCell) {
+            await sendCommand("Input.dispatchKeyEvent", { type: "keyDown", text: ch, key: ch, unmodifiedText: ch });
+            await sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: ch });
+            await sleep(20);
+          }
+          await sleep(50);
+          await cdpKey("Enter");
+          await sleep(300); // Wait for cell navigation
+        } else {
+          // Last resort: click at fixed Name Box coordinates (typical Sheets position)
+          console.log("Name Box not found via DOM — using fixed coordinates (55, 148)");
+          await cdpClick(55, 148);
+          await sleep(150);
+          await cdpSelectAll();
+          await cdpKey("Backspace");
+          await sleep(50);
+          for (const ch of startCell) {
+            await sendCommand("Input.dispatchKeyEvent", { type: "keyDown", text: ch, key: ch, unmodifiedText: ch });
+            await sendCommand("Input.dispatchKeyEvent", { type: "keyUp", key: ch });
+            await sleep(20);
+          }
+          await sleep(50);
+          await cdpKey("Enter");
+          await sleep(300);
+        }
+
+        // Step 2: Enter values one by one with Enter/Tab between them
+        let enteredCount = 0;
+        for (const value of values) {
+          await cdpType(value);
+          await sleep(50);
+          await cdpKey(advanceKey); // Enter moves down, Tab moves right
+          await sleep(100);
+          enteredCount++;
+        }
+
+        action._fillResult = {
+          startCell,
+          count: enteredCount,
+          direction,
+          values,
+        };
+        console.log(`fill_cells: entered ${enteredCount} values starting at ${startCell}`);
+
+      } catch (err) {
+        console.error("fill_cells failed:", err);
+        action._fillResult = { error: err.message };
+      }
+      break;
+    }
+
+    // ── Scraping Actions ──
+    case "scrape_page": {
+      const data = await cdpScrapePageHtml();
+      action._scrapedData = data;
+      break;
+    }
+
+    case "scrape_table": {
+      const data = await cdpScrapeTableHtml(action.ref);
+      action._scrapedData = data;
+      break;
+    }
+
+    case "scrape_links": {
+      const data = await cdpScrapeLinks();
+      action._scrapedData = data;
+      break;
+    }
+
+    case "scrape_metadata": {
+      const data = await cdpScrapeMetadata();
+      action._scrapedData = data;
+      break;
+    }
+
+    case "scrape_network": {
+      const data = await cdpScrapeNetwork();
+      action._scrapedData = data;
+      break;
+    }
+
+    // ── Memory Actions (handled by backend, extension just passes through) ──
+    case "store":
+    case "recall":
+      // These are handled server-side. No CDP action needed.
+      break;
+
+    case "dismiss_popup": {
+      const result = await cdpDismissPopup();
+      action._dismissResult = result;
+      break;
+    }
+
+    case "click_captcha": {
+      const result = await cdpClickCaptcha();
+      action._captchaResult = result;
+      break;
+    }
+
+    case "wait":
+      await sleep(Math.min(action.duration || 1000, 5000));
+      break;
+
+    case "accept_dialog":
+      await handleDialog(true);
+      break;
+
+    case "dismiss_dialog":
+      await handleDialog(false);
+      break;
+
+    case "done":
+      await detachDebugger();
+      break;
+
+    default:
+      console.warn(`Unknown action type: ${action.type}`);
+  }
+
+  return action;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Wait for the page to be ready (document loaded, no pending navigation).
+ * Called before capturing state — NOT after every action.
+ * This replaces all the hardcoded post-action sleeps.
+ */
+async function waitForPageReady(timeout = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      const result = await sendCommand("Runtime.evaluate", {
+        expression: "document.readyState",
+        returnByValue: true,
+      });
+      if (result.result.value === "complete") {
+        return; // Page is ready
+      }
+    } catch (_) {
+      // Runtime.evaluate fails during navigation — detach and retry
+      await detachDebugger();
+    }
+    await sleep(300);
+  }
+  // Timeout — proceed anyway, page might be slow-loading dynamic content
+}
+
+// ── Dialog / Alert Handling ──────────────────────────────────
+
+let pendingDialog = null;
+
+/**
+ * Set up CDP event listener for JS dialogs (alert, confirm, prompt, beforeunload).
+ * Auto-dismisses alerts. Stores confirm/prompt dialogs for the agent to handle.
+ */
+async function setupDialogHandler(tabId) {
+  await attachDebugger(tabId);
+  // Enable page events
+  await sendCommand("Page.enable");
+
+  chrome.debugger.onEvent.addListener((source, method, params) => {
+    if (source.tabId !== attachedTabId) return;
+
+    if (method === "Page.javascriptDialogOpening") {
+      pendingDialog = {
+        type: params.type,       // "alert", "confirm", "prompt", "beforeunload"
+        message: params.message,
+      };
+
+      // Auto-accept alerts (they just block execution)
+      if (params.type === "alert") {
+        sendCommand("Page.handleJavaScriptDialog", { accept: true }).catch(() => {});
+        pendingDialog = null;
+      }
+    }
+  });
+}
+
+/**
+ * Handle a pending JS dialog. Called when the agent decides to accept or dismiss.
+ */
+async function handleDialog(accept) {
+  if (!pendingDialog) return;
+  await sendCommand("Page.handleJavaScriptDialog", { accept });
+  pendingDialog = null;
+}
+
+/**
+ * Get any pending dialog info (for the agent to see).
+ */
+function getPendingDialog() {
+  return pendingDialog;
+}
+
+if (typeof globalThis !== "undefined") {
+  globalThis.addEventListener?.("unload", () => detachDebugger());
+}
