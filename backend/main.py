@@ -800,7 +800,9 @@ async def sheets_write(req: SheetsWriteRequest):
         gc = _get_gspread_client_for_token(req.token)
         sh = gc.open_by_key(req.spreadsheet_id)
         worksheet = sh.sheet1
-        worksheet.update(req.range, req.values)
+        # gspread 6.x flipped the signature: update(values, range_name, ...).
+        # Use kwargs to avoid confusion and silent misreads.
+        worksheet.update(values=req.values, range_name=req.range)
         return {
             "success": True,
             "range": req.range,

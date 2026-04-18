@@ -34,6 +34,35 @@ body {
 
 .hidden { display: none !important; }
 
+/* ═══ ACTIVITY BAR ═══ */
+/* A thin sliding highlight at the very top of the app shell — visible any
+   time the agent is working (running=true). Gives the user a persistent
+   signal that something is happening even during long CDP operations. */
+.activity-bar {
+  position: relative;
+  height: 2px;
+  background: rgba(255, 111, 32, 0.12);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.activity-bar::after {
+  content: '';
+  position: absolute;
+  left: -40%;
+  top: 0;
+  width: 40%;
+  height: 100%;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--orange) 50%,
+    transparent 100%);
+  animation: activity-slide 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+@keyframes activity-slide {
+  0%   { left: -40%; }
+  100% { left: 100%; }
+}
+
 /* ═══ HEADER ═══ */
 .header {
   display: flex;
@@ -368,6 +397,29 @@ body {
   font-weight: 500;
   padding: 6px 12px;
   max-width: 92%;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.chat-bubble.action .action-status {
+  min-width: 1em;
+  font-weight: 700;
+}
+.chat-bubble.action.running { opacity: 0.7; }
+.chat-bubble.action.running .action-status {
+  animation: dots 1.2s steps(3) infinite;
+}
+.chat-bubble.action.ok { color: var(--orange-light); }
+.chat-bubble.action.ok .action-status { color: var(--orange); }
+.chat-bubble.action.fail {
+  color: var(--red);
+  background: rgba(255, 107, 107, 0.06);
+  border-left-color: var(--red);
+}
+.chat-bubble.action .action-error {
+  color: var(--red);
+  font-style: italic;
+  opacity: 0.9;
 }
 .chat-bubble.error {
   align-self: flex-start;
