@@ -24,6 +24,7 @@ to do based on the layered system prompt + the current session state.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import uuid
@@ -215,7 +216,7 @@ WORKSPACE WRITE (use APIs, never canvas)
 THINKING AIDS
   ask_advisor(question, context?)    store(key)    recall(key)    wait(ms)
 
-10 hard tool-selection rules:
+11 hard tool-selection rules:
 1. Every new session MUST start with `chat` + `clarify` to greet and scope. No tools fire until there is a todo plan.
 2. Before the first state-changing tool in a todo, emit `request_approval(todo_id)` and STOP. Never run a navigate/click/type without approval.
 3. Observation tools are always free. You can probe/scrape/screenshot without approval.
@@ -223,12 +224,15 @@ THINKING AIDS
 5. Before the FIRST navigation in a new session, run `probe_site` — you need a page model.
 6. After any gate (popup/dialog/captcha/auth), re-run `probe_site` before continuing.
 7. **Think parameterization from the start.** As you clarify, identify which pieces of the task are session-specific knobs (recipient, budget, query terms, output columns, date ranges, etc.) vs. invariant structure. Call them out in `chat` as you spot them so the user knows what's being parameterized. Keep a running mental list — you will commit it via `generalized_inputs` when you call `save_playbook`.
-8. **Verify-before-done loop — non-negotiable.** Every todo ends with a verification pass, NOT with the last interaction. After the state-changing action for a todo runs, in the SAME turn or the very next one:
-   - call `screenshot` AND `probe_site` to see what actually happened,
-   - then call `verify(expected)` with a concrete expected signal (URL shape, visible text, a network response, a DOM element that should now exist).
-   If verify passes → `mark_todo_done(todo_id, summary)`. If verify fails → describe what you saw in `chat`, retry the corrective action ONCE (new params or different selector), and re-verify. Two consecutive verify failures on the same todo → `ask_advisor`, and if still stuck, `update_todo(status="failed", note=...)`. Never call `mark_todo_done` on a todo whose verify did not pass.
+8. **Verify visually, then finalize.** Every todo ends with a real visual check, not a string match. After the state-changing action runs:
+   - call `screenshot` (or `probe_site` — it also returns an image) to actually SEE the page,
+   - if the expected content is below the fold, call `scroll(deltaY=600)` then `screenshot` again — DO scroll to read full rich results, pricing tables, multi-row data,
+   - then describe in `chat` what you see ("The Google rich card shows AQI 145 at the top"), and emit `mark_todo_done(todo_id, summary)` with that observation.
+   `verify(url_contains / text_contains)` is the fallback for exact assertions (you KNOW a specific URL or verbatim word must be there). Don't use verify for fuzzy "is this page showing the AQI" questions — LOOK at the screenshot and decide.
+   If the screenshot shows something wrong → retry the corrective action ONCE with better params, re-screenshot. Two failures in a row → `ask_advisor`, and if still stuck → `update_todo(status="failed", note=...)`. Never `mark_todo_done` on a todo you haven't actually seen succeed.
 9. `save_playbook` is only offered after all todos are `done` and no human gates are open. It MUST include a non-empty `generalized_inputs` array — otherwise the saved playbook is a one-shot and useless for reruns.
 10. If two successive actions fail, stop and `ask_advisor` instead of trying a third variant.
+11. **Do not stall with narration.** When a browser-tool result comes back AND an active todo is still `running`, your next turn MUST include a tool call — another browser action, `verify`, `mark_todo_done`, `request_approval` for the next todo, `ask_advisor`, or `clarify` if the result contradicts the plan. Pure-text turns ("Search results are in. Taking a peek…") without any tool call exit the loop and force the user to type "continue" manually. Narrate via `chat` in the SAME turn as the next tool — never as the only content.
 </pixel_tool_discipline>"""
 
 
@@ -393,8 +397,16 @@ CONVERSATIONAL_TOOLS = [
 # --- Browser-side tools — the client actually executes these --------------
 # Each one's `action` field on the client side matches its name (or an alias).
 BROWSER_TOOLS = [
-    _fn("probe_site", "Read the current page: elements, page type, auth state, gates, anchors.", _obj()),
-    _fn("screenshot", "Request a screenshot of the current page for the next turn.", _obj()),
+    _fn(
+        "probe_site",
+        "Inspect the current page. Returns a compact element list (ref, tag, desc, href, role) AND the actual page screenshot as an image — you will SEE the page. Preferred first action after any navigation.",
+        _obj(),
+    ),
+    _fn(
+        "screenshot",
+        "Capture the current viewport as an image you will SEE. Use this whenever visual inspection matters — verifying a rich card/snippet/widget, reading CAPTCHA, checking chart values, sanity-checking a click landed where you expected.",
+        _obj(),
+    ),
     _fn("scrape_network", "Return captured XHR/Fetch JSON responses from the current page.", _obj()),
     _fn("scrape_page", "Scrape the current page to clean Markdown.", _obj()),
     _fn("scrape_metadata", "Return page title, OG tags, canonical URL, language.", _obj()),
@@ -488,11 +500,11 @@ BROWSER_TOOLS = [
 
     _fn(
         "verify",
-        "Run a success check: URL change, visible text, network response, or download. MUST be called at the end of every todo before mark_todo_done — it's the pass/fail gate. Pair with `screenshot` + `probe_site` on the same turn so you can see what you're verifying against.",
+        "Structured success check. Returns the page screenshot AND the result of the checks you specify. PREFER visual verification: call `screenshot` and LOOK at the page yourself ('I can read AQI: 145 in the Google rich card'), then emit mark_todo_done. Only use verify for exact deterministic assertions: URL substring, a specific word known to appear verbatim.",
         _obj(
-            expected=_str("Concrete description of what success looks like on the page right now."),
-            url_contains=_str("Expected substring in URL.", required=False),
-            text_contains=_str("Expected substring of visible text.", required=False),
+            expected=_str("Concrete description of what success looks like — used as a fuzzy token-coverage fallback.", required=False),
+            url_contains=_str("Expected substring in the URL.", required=False),
+            text_contains=_str("Expected substring of visible text (case-insensitive).", required=False),
         ),
     ),
 
@@ -708,13 +720,26 @@ def run_agent_step(
             Content(role="user", parts=[Part.from_text(text=user_message.strip())])
         )
     if action_results:
-        response_parts = [
-            Part.from_function_response(
-                name=r["name"],
-                response=r.get("response") or {},
+        response_parts = []
+        for r in action_results:
+            name = r["name"]
+            response = dict(r.get("response") or {})
+            # Peel off the screenshot bytes BEFORE the response goes into the
+            # function_response Part (JSON text). Attach the image as its own
+            # Part right after — Gemini 3 is multimodal and will see the page.
+            screenshot_b64 = response.pop("screenshot_base64", None)
+            screenshot_mime = response.pop("screenshot_mime", "image/png")
+            response_parts.append(
+                Part.from_function_response(name=name, response=response)
             )
-            for r in action_results
-        ]
+            if screenshot_b64:
+                try:
+                    img_bytes = base64.b64decode(screenshot_b64)
+                    response_parts.append(
+                        Part.from_bytes(data=img_bytes, mime_type=screenshot_mime)
+                    )
+                except Exception as e:
+                    print(f"  failed to decode screenshot bytes for {name}: {e}")
         contents.append(Content(role="user", parts=response_parts))
 
     if not contents:

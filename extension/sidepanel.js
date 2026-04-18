@@ -32,6 +32,7 @@ const todoStrip = document.getElementById("todoStrip");
 const todoStripList = document.getElementById("todoStripList");
 const todoStripCount = document.getElementById("todoStripCount");
 
+const activityBar = document.getElementById("activityBar");
 const saveBanner = document.getElementById("saveBanner");
 const saveBtn = document.getElementById("saveBtn");
 
@@ -44,6 +45,10 @@ let sessionId = null;
 let running = false;
 let currentAbort = null;
 let renderedMessageIds = new Set();
+// Tracks optimistic user bubbles (content → count). When a matching
+// server-persisted user message arrives from /agent/step, we consume one
+// entry and skip re-rendering so the UI doesn't double.
+const pendingOptimisticUser = new Map();
 
 // ── Views ───────────────────────────────────────────────────
 function showLanding() {
@@ -71,6 +76,7 @@ function showPlaybooks() {
 function goHome() {
   sessionId = null;
   renderedMessageIds = new Set();
+  pendingOptimisticUser.clear();
   chatThread.innerHTML = "";
   setTodoPlan({ todos: [] }, null);
   pendingApprovalBubble = null;
@@ -108,7 +114,34 @@ function removeThinking() {
 
 function addActionBubble(actionName, args) {
   const summary = describeAction(actionName, args);
-  return addBubble("assistant", summary, { cls: "action" });
+  const el = document.createElement("div");
+  el.className = "chat-bubble action running";
+  el.dataset.actionName = actionName;
+  const status = document.createElement("span");
+  status.className = "action-status";
+  status.textContent = "…";
+  const label = document.createElement("span");
+  label.className = "action-label";
+  label.textContent = summary;
+  el.appendChild(status);
+  el.appendChild(label);
+  chatThread.appendChild(el);
+  chatThread.scrollTop = chatThread.scrollHeight;
+  return el;
+}
+
+function markActionBubble(bubble, outcome, response) {
+  if (!bubble) return;
+  bubble.classList.remove("running");
+  bubble.classList.add(outcome === "ok" ? "ok" : "fail");
+  const status = bubble.querySelector(".action-status");
+  if (status) status.textContent = outcome === "ok" ? "✓" : "✗";
+  if (outcome !== "ok" && response && response.error) {
+    const err = document.createElement("span");
+    err.className = "action-error";
+    err.textContent = ` — ${String(response.error).slice(0, 140)}`;
+    bubble.appendChild(err);
+  }
 }
 
 function describeAction(name, args = {}) {
@@ -271,6 +304,13 @@ function renderMessages(messages) {
     if (renderedMessageIds.has(m.id)) continue;
     renderedMessageIds.add(m.id);
     if (m.role === "user") {
+      // If we already showed this content optimistically, consume that entry
+      // and don't double-render.
+      const count = pendingOptimisticUser.get(m.content) || 0;
+      if (count > 0) {
+        pendingOptimisticUser.set(m.content, count - 1);
+        continue;
+      }
       addBubble("user", m.content);
     } else if (m.role === "assistant" && m.message_type === "chat") {
       addBubble("assistant", m.content);
@@ -288,6 +328,7 @@ function setRunning(state) {
   sendBtn?.classList.toggle("hidden", state);
   stopBtn?.classList.toggle("hidden", !state);
   taskInput.disabled = state;
+  activityBar?.classList.toggle("hidden", !state);
 }
 
 // ── Session lifecycle ───────────────────────────────────────
@@ -370,6 +411,7 @@ async function sendMessage() {
   }
 
   addBubble("user", text);
+  pendingOptimisticUser.set(text, (pendingOptimisticUser.get(text) || 0) + 1);
   // Typing a fresh message implicitly resolves any open approval bubble.
   if (pendingApprovalBubble) resolveApprovalBubble(pendingApprovalBubble, "rejected");
   setRunning(true);
@@ -411,62 +453,81 @@ async function rejectCurrentTodo() {
 // ── Main agent-step driver ──────────────────────────────────
 async function driveAgentStep(firstPayload) {
   let payload = firstPayload;
-  for (let iter = 0; iter < MAX_ACTION_ITERATIONS; iter++) {
-    const thinking = addThinking();
-    let result;
-    try {
-      result = await postAgentStep(payload);
-    } finally {
-      thinking.remove();
+  // A single thinking indicator is kept alive across the entire loop — agent
+  // call AND action dispatch — so the UI never goes silent during the
+  // ~5-20s it takes CDP to screenshot / probe / scrape. We move it to the
+  // bottom of the thread after each new bubble so it always trails the work.
+  let thinking = addThinking();
+
+  const bumpThinking = () => {
+    // Re-append the same node to push it below any newly added bubble.
+    if (thinking && thinking.parentNode) {
+      thinking.parentNode.appendChild(thinking);
+      chatThread.scrollTop = chatThread.scrollHeight;
     }
+  };
 
-    renderMessages(result.messages || []);
-    setTodoPlan(result.session.todo_plan, result.session.active_todo_id);
+  try {
+    for (let iter = 0; iter < MAX_ACTION_ITERATIONS; iter++) {
+      const result = await postAgentStep(payload);
 
-    if (result.session.status === "ready_to_save") {
-      showSaveBanner();
-    } else {
-      hideSaveBanner();
-    }
+      renderMessages(result.messages || []);
+      setTodoPlan(result.session.todo_plan, result.session.active_todo_id);
+      bumpThinking();
 
-    if (result.awaiting_approval) {
-      const activeTodo = (result.session.todo_plan.todos || []).find(
-        (t) => t.id === result.approval_todo_id
-      );
-      const previewText =
-        result.approval_preview ||
-        activeTodo?.description ||
-        activeTodo?.title ||
-        "Ready when you are.";
-      addApprovalBubble(result.approval_todo_id, previewText);
-      return;
-    }
-
-    const pending = result.pending_actions || [];
-    if (!pending.length) {
-      // Agent emitted text only — turn is done.
-      return;
-    }
-
-    // Execute each browser action the agent asked for.
-    const action_results = [];
-    for (const pa of pending) {
-      addActionBubble(pa.name, pa.args || {});
-      try {
-        const response = await handlePendingAction(pa.name, pa.args || {});
-        action_results.push({ call_id: pa.call_id, name: pa.name, response });
-      } catch (err) {
-        console.error(`action ${pa.name} failed`, err);
-        action_results.push({
-          call_id: pa.call_id,
-          name: pa.name,
-          response: { ok: false, error: err.message || String(err) },
-        });
+      if (result.session.status === "ready_to_save") {
+        showSaveBanner();
+      } else {
+        hideSaveBanner();
       }
+
+      if (result.awaiting_approval) {
+        const activeTodo = (result.session.todo_plan.todos || []).find(
+          (t) => t.id === result.approval_todo_id
+        );
+        const previewText =
+          result.approval_preview ||
+          activeTodo?.description ||
+          activeTodo?.title ||
+          "Ready when you are.";
+        addApprovalBubble(result.approval_todo_id, previewText);
+        return;
+      }
+
+      const pending = result.pending_actions || [];
+      if (!pending.length) {
+        // Agent emitted text only — turn is done.
+        return;
+      }
+
+      // Execute each browser action the agent asked for. Thinking indicator
+      // stays alive — gets bumped below each new action bubble.
+      const action_results = [];
+      for (const pa of pending) {
+        const bubble = addActionBubble(pa.name, pa.args || {});
+        bumpThinking();
+        try {
+          const response = await handlePendingAction(pa.name, pa.args || {});
+          const ok = response && response.ok !== false;
+          markActionBubble(bubble, ok ? "ok" : "fail", response);
+          action_results.push({ call_id: pa.call_id, name: pa.name, response });
+        } catch (err) {
+          console.error(`action ${pa.name} failed`, err);
+          markActionBubble(bubble, "fail", { error: err.message || String(err) });
+          action_results.push({
+            call_id: pa.call_id,
+            name: pa.name,
+            response: { ok: false, error: err.message || String(err) },
+          });
+        }
+        bumpThinking();
+      }
+      payload = { user_message: null, action_results };
     }
-    payload = { user_message: null, action_results };
+    addBubble("assistant", "(hit the step cap — taking a breath.)", { cls: "system" });
+  } finally {
+    thinking?.remove();
   }
-  addBubble("assistant", "(hit the step cap — taking a breath.)", { cls: "system" });
 }
 
 // ── Pending action dispatcher ───────────────────────────────
@@ -540,11 +601,11 @@ async function handlePendingAction(name, args) {
   // "probe_site" / "screenshot" / "ensure_session" / "verify" map to captureState
   if (name === "probe_site") {
     const state = await captureState(true);
-    return snapshotResponse(state, { ok: true, purpose: "probe_site" });
+    return snapshotResponse(state, { ok: true, purpose: "probe_site" }, { includeScreenshot: true });
   }
   if (name === "screenshot") {
     const state = await captureState(true);
-    return snapshotResponse(state, { ok: true, purpose: "screenshot" });
+    return snapshotResponse(state, { ok: true, purpose: "screenshot" }, { includeScreenshot: true });
   }
   if (name === "ensure_session") {
     const state = await captureState(false);
@@ -553,10 +614,52 @@ async function handlePendingAction(name, args) {
   }
   if (name === "verify") {
     const state = await captureState(false);
-    const expected = (args.expected_text || args.expected || "").toLowerCase();
+    const url = (state?.url || "").toLowerCase();
     const flat = flattenElements(state.elements).toLowerCase();
-    const present = !!expected && flat.includes(expected);
-    return snapshotResponse(state, { ok: present, expected, present });
+    const urlContains = (args.url_contains || "").toLowerCase().trim();
+    const textContains = (args.text_contains || "").toLowerCase().trim();
+    const expected = (args.expected_text || args.expected || "").toLowerCase().trim();
+
+    const signals = [];
+    let pass = true;
+
+    if (urlContains) {
+      const hit = url.includes(urlContains);
+      signals.push({ check: "url_contains", value: urlContains, pass: hit });
+      if (!hit) pass = false;
+    }
+    if (textContains) {
+      const hit = flat.includes(textContains);
+      signals.push({ check: "text_contains", value: textContains, pass: hit });
+      if (!hit) pass = false;
+    }
+    // Only fall back to fuzzy token coverage if no structured check was given.
+    if (!urlContains && !textContains && expected) {
+      const STOP = new Set(["the","a","an","of","for","to","and","in","on","is","with","at","or","by","as","be","page","showing","information"]);
+      const tokens = expected.split(/[^\p{L}\p{N}]+/u).filter((t) => t && !STOP.has(t));
+      const present = tokens.filter((t) => flat.includes(t) || url.includes(t));
+      const coverage = tokens.length ? present.length / tokens.length : 0;
+      const hit = coverage >= 0.5;
+      signals.push({
+        check: "token_coverage",
+        value: expected,
+        coverage: Number(coverage.toFixed(2)),
+        matched: present,
+        missing: tokens.filter((t) => !present.includes(t)),
+        pass: hit,
+      });
+      if (!hit) pass = false;
+    }
+    if (!signals.length) {
+      // No expected-signal args at all — just report state.
+      return snapshotResponse(state, {
+        ok: false,
+        error: "verify needs at least one of url_contains / text_contains / expected",
+      });
+    }
+    // No screenshot here — verify is for deterministic assertions. If Pixel
+    // wants to SEE the page, it calls screenshot explicitly.
+    return snapshotResponse(state, { ok: pass, signals });
   }
 
   // Click-by-coordinates
@@ -588,24 +691,41 @@ function buildExecAction(name, args) {
   return { type: name, ...args };
 }
 
-function snapshotResponse(state, extras = {}) {
+function snapshotResponse(state, extras = {}, { includeScreenshot = false } = {}) {
   const tab = state?.screenshot || {};
-  const elementsCount = Array.isArray(state?.elements) ? state.elements.length : 0;
-  const url = state?.url || "";
-  const title = state?.title || "";
-  // Avoid shipping the element list back to the backend — it'd balloon the
-  // Gemini conversation. Just describe the result.
-  return {
+  const raw = Array.isArray(state?.elements) ? state.elements : [];
+  const MAX_ELEMENTS = 120;
+  const compactElements = raw.slice(0, MAX_ELEMENTS).map((e) => {
+    const out = { ref: e.ref, tag: e.tag };
+    const desc = (e.desc || e.text || "").toString().trim();
+    if (desc) out.desc = desc.length > 160 ? desc.slice(0, 160) + "…" : desc;
+    const value = (e.value || "").toString().trim();
+    if (value) out.value = value.length > 100 ? value.slice(0, 100) + "…" : value;
+    if (e.role) out.role = e.role;
+    if (e.href) out.href = e.href;
+    return out;
+  });
+  const out = {
     ...extras,
-    url: url,
-    title: title,
-    element_count: elementsCount,
+    url: state?.url || "",
+    title: state?.title || "",
+    element_count: raw.length,
+    elements: compactElements,
+    elements_truncated: raw.length > MAX_ELEMENTS,
     popup: state?.popup ? truthy(state.popup) : null,
     captcha: state?.captcha ? truthy(state.captcha) : null,
     dialog: state?.dialog || null,
     tab_id: tab.tabId || null,
     page_loading: !!state?.pageLoading,
   };
+  // Ship the image bytes ONLY when requested (probe_site / screenshot /
+  // verify). Gemini's multimodal: the backend will pull this out and attach
+  // it as an image Part so Pro can actually SEE the page.
+  if (includeScreenshot && tab.base64) {
+    out.screenshot_base64 = tab.base64;
+    out.screenshot_mime = tab.mime || "image/jpeg";
+  }
+  return out;
 }
 
 function truthy(obj) {
@@ -705,6 +825,8 @@ async function captureScreenshot(tab) {
   let dataUrl = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
+      // PNG — lossless. Needed for reliable CAPTCHA text, fine UI details,
+      // and anti-aliased text on charts/canvas.
       dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
       break;
     } catch (e) {
@@ -713,6 +835,7 @@ async function captureScreenshot(tab) {
   }
   return {
     base64: dataUrl ? dataUrl.split(",")[1] : null,
+    mime: "image/png",
     tabId: tab.id,
     width: tab.width,
     height: tab.height,
