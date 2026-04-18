@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PixelFoxx — Design System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Silkscreen:wght@400;700&display=swap" rel="stylesheet" />
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="tokens.jsx"></script>
+<script type="text/babel" src="primitives.jsx"></script>
+<script type="text/babel" src="tier1-screens.jsx"></script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #14110E; color: #F4EFE6; font-family: 'Space Grotesk', system-ui, sans-serif; }
+  body { padding: 48px; min-height: 100vh; }
+
+  @keyframes fxPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: #3A352D; }
+
+  .ds-wrap { max-width: 1100px; margin: 0 auto; }
+  .ds-h1 { font-family: 'Silkscreen', monospace; font-size: 36px; letter-spacing: 1px; margin-bottom: 8px; }
+  .ds-h1 span { color: #FF6A1A; }
+  .ds-tag { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #6B6357; letter-spacing: 0.5px; margin-bottom: 56px; }
+  .ds-section { margin-bottom: 72px; padding-top: 20px; border-top: 1px solid #3A352D; }
+  .ds-section-header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .ds-section-num { font-family: 'Silkscreen', monospace; font-size: 12px; color: #FF6A1A; letter-spacing: 1px; }
+  .ds-h2 { font-family: 'Silkscreen', monospace; font-size: 20px; letter-spacing: 0.5px; }
+  .ds-section-sub { font-size: 13px; color: #A89E8D; max-width: 720px; margin-bottom: 28px; line-height: 1.55; }
+  .ds-h3 { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #6B6357; letter-spacing: 0.6px; text-transform: uppercase; margin-bottom: 12px; }
+  .card { background: #1C1916; border: 1px solid #3A352D; padding: 20px; }
+  .grid { display: grid; gap: 12px; }
+  .swatch { padding: 12px; border: 1px solid #3A352D; display: flex; flex-direction: column; gap: 10px; }
+  .swatch-preview { height: 52px; clip-path: polygon(0 3px, 3px 3px, 3px 0, calc(100% - 3px) 0, calc(100% - 3px) 3px, 100% 3px, 100% calc(100% - 3px), calc(100% - 3px) calc(100% - 3px), calc(100% - 3px) 100%, 3px 100%, 3px calc(100% - 3px), 0 calc(100% - 3px)); }
+  .swatch-name { font-size: 12px; font-weight: 600; }
+  .swatch-hex, .swatch-ref { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #6B6357; letter-spacing: 0.3px; }
+  .demo-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; padding: 20px; background: #1C1916; border: 1px solid #3A352D; margin-bottom: 12px; }
+  .demo-caption { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: #6B6357; margin-top: 6px; }
+  .token-table { width: 100%; border-collapse: collapse; }
+  .token-table td { padding: 10px 12px; border-bottom: 1px solid #3A352D; font-size: 12px; vertical-align: middle; }
+  .token-table td:first-child { font-family: 'JetBrains Mono', monospace; color: #FFC83D; width: 140px; }
+  .token-table td:nth-child(2) { font-family: 'JetBrains Mono', monospace; color: #F4EFE6; width: 180px; }
+  .token-table td:last-child { color: #A89E8D; }
+  code.inline { font-family: 'JetBrains Mono', monospace; background: #24211D; padding: 2px 6px; font-size: 11px; color: #FFC83D; }
+  .rule { display: flex; gap: 10px; padding: 10px 12px; background: #14110E; border-left: 3px solid #FF6A1A; font-size: 12px; color: #A89E8D; line-height: 1.5; margin-bottom: 6px; }
+  .rule.no { border-left-color: #FF5A4E; }
+  .rule.yes { border-left-color: #7FD46B; }
+  .rule strong { color: #F4EFE6; font-weight: 600; display: block; margin-bottom: 2px; }
+  .voice-quote { padding: 12px 14px; background: #14110E; border: 1px solid #3A352D; font-size: 13px; color: #F4EFE6; line-height: 1.55; margin-bottom: 8px; font-style: italic; position: relative; padding-left: 32px; }
+  .voice-quote::before { content: '"'; position: absolute; left: 10px; top: 0; font-size: 34px; color: #FF6A1A; font-family: 'Silkscreen', monospace; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { FX } = window;
+
+// ═══════════════ Helpers ═══════════════
+const Section = ({ num, title, sub, children }) => (
+  <section className="ds-section">
+    <div className="ds-section-header">
+      <div className="ds-section-num">{num}</div>
+      <h2 className="ds-h2">{title}</h2>
+    </div>
+    {sub && <div className="ds-section-sub">{sub}</div>}
+    {children}
+  </section>
+);
+
+const Swatch = ({ name, hex, fxKey, dark }) => (
+  <div className="swatch">
+    <div className="swatch-preview" style={{ background: hex, border: hex === FX.bg || hex === FX.surface ? `1px solid ${FX.line}` : 'none' }}/>
+    <div>
+      <div className="swatch-name" style={{ color: dark ? FX.text : FX.text }}>{name}</div>
+      <div className="swatch-ref">FX.{fxKey}</div>
+      <div className="swatch-hex">{hex.toUpperCase()}</div>
+    </div>
+  </div>
+);
+
+const TypeSpec = ({ label, sample, font, size, weight, tracking, usage }) => (
+  <div style={{ padding: 20, background: FX.surface, border: `1px solid ${FX.line}`, marginBottom: 10, display: 'flex', gap: 24, alignItems: 'flex-start' }}>
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ fontFamily: font, fontSize: size, fontWeight: weight, letterSpacing: tracking, color: FX.text, marginBottom: 14, lineHeight: 1.15 }}>{sample}</div>
+      <div className="demo-caption">{usage}</div>
+    </div>
+    <div style={{ width: 200, fontFamily: FX.mono, fontSize: 10, color: FX.textMute, lineHeight: 1.8, flexShrink: 0 }}>
+      <div><span style={{ color: FX.orange }}>name</span> &nbsp;{label}</div>
+      <div><span style={{ color: FX.orange }}>font</span> &nbsp;{font.split(',')[0].replace(/'/g,'')}</div>
+      <div><span style={{ color: FX.orange }}>size</span> &nbsp;{size}px</div>
+      <div><span style={{ color: FX.orange }}>weight</span> &nbsp;{weight}</div>
+      {tracking && <div><span style={{ color: FX.orange }}>track</span> &nbsp;{tracking}px</div>}
+    </div>
+  </div>
+);
+
+// ═══════════════ App ═══════════════
+const App = () => (
+  <div className="ds-wrap">
+    <h1 className="ds-h1">PIXEL<span>FOXX</span> — DESIGN SYSTEM</h1>
+    <div className="ds-tag">v1.1 · BROWSER AUTOMATION CO-PILOT · NICK WILDE ENERGY</div>
+
+    {/* ═══════════════ 01 — Brand Vibe ═══════════════ */}
+    <Section num="01" title="Brand Vibe" sub="Warm, dry, pixel-nostalgic. We're an AI tool that doesn't feel like one. 8-bit accents meet modern UI. Everything's a little handmade, a little cheeky, always confident.">
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        <div className="card">
+          <div className="ds-h3">Voice — Pixel Foxx</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.6, marginBottom: 14 }}>
+            Nick Wilde, softened into a collaborator. Warm, dry, quietly clever. Speaks in lowercase, in short sentences. Uses the user's <strong style={{color: FX.text}}>first name</strong> once signed in (<code className="inline">anna</code>, lowercased). <code className="inline">partner</code> or <code className="inline">buddy</code> is the pre-auth fallback. Never "user" or "human".
+          </div>
+          <div className="voice-quote">well, hey there partner.</div>
+          <div className="voice-quote">aight anna, running Job Hunt. i'll keep you posted.</div>
+          <div className="voice-quote">okay, gmail inbox. looks like a crime scene.</div>
+          <div className="voice-quote">hit a 2FA wall. house rule — i don't touch codes.</div>
+        </div>
+        <div className="card">
+          <div className="ds-h3">Tenets</div>
+          <div className="rule yes"><div><strong>Show before you tell.</strong>Narrate actions as they happen, in one short sentence.</div></div>
+          <div className="rule yes"><div><strong>Honesty over confidence.</strong>If a step's unverified, say "i think so — can you confirm?"</div></div>
+          <div className="rule no"><div><strong>Never narrate mechanics.</strong>Don't say "I will now invoke the click function…" — talk like a person.</div></div>
+          <div className="rule no"><div><strong>Never ask for secrets.</strong>Passwords, OTPs, 2FA codes — always hand off to the user.</div></div>
+        </div>
+      </div>
+    </Section>
+
+    {/* ═══════════════ 02 — Colors ═══════════════ */}
+    <Section num="02" title="Colors" sub="A tight 13-token palette rooted in the mascot. Near-black warm base, five surface tiers, warm off-white text, and three brand accents (orange, yellow, blue) lifted straight from the fox.">
+      <div className="ds-h3">Surfaces · warm black scale</div>
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(6, 1fr)', marginBottom: 24 }}>
+        <Swatch name="bg" hex={FX.bg} fxKey="bg" />
+        <Swatch name="surface" hex={FX.surface} fxKey="surface" />
+        <Swatch name="surface2" hex={FX.surface2} fxKey="surface2" />
+        <Swatch name="surface3" hex={FX.surface3} fxKey="surface3" />
+        <Swatch name="line" hex={FX.line} fxKey="line" />
+        <Swatch name="line2" hex={FX.line2} fxKey="line2" />
+      </div>
+
+      <div className="ds-h3">Text · warm off-white</div>
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)', marginBottom: 24 }}>
+        <Swatch name="text" hex={FX.text} fxKey="text" />
+        <Swatch name="textDim" hex={FX.textDim} fxKey="textDim" />
+        <Swatch name="textMute" hex={FX.textMute} fxKey="textMute" />
+      </div>
+
+      <div className="ds-h3">Brand · lifted from the mascot</div>
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(4, 1fr)', marginBottom: 24 }}>
+        <Swatch name="orange — primary" hex={FX.orange} fxKey="orange" />
+        <Swatch name="orangeDk" hex={FX.orangeDk} fxKey="orangeDk" />
+        <Swatch name="yellow" hex={FX.yellow} fxKey="yellow" />
+        <Swatch name="blue" hex={FX.blue} fxKey="blue" />
+      </div>
+
+      <div className="ds-h3">Semantic</div>
+      <div className="grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)', marginBottom: 20 }}>
+        <Swatch name="ok" hex={FX.ok} fxKey="ok" />
+        <Swatch name="warn" hex={FX.warn} fxKey="warn" />
+        <Swatch name="err" hex={FX.err} fxKey="err" />
+      </div>
+
+      <div className="card">
+        <div className="ds-h3">Usage Rules</div>
+        <div className="rule yes"><div><strong>Orange leads.</strong>Primary CTA, active tab, mascot accent, agent narration. Every screen has exactly one orange moment.</div></div>
+        <div className="rule yes"><div><strong>Yellow warns & celebrates.</strong>Paused states, warnings, takeover moments, variables <code className="inline">{"{{like this}}"}</code>. Pick yellow OR blue as a support, never both.</div></div>
+        <div className="rule yes"><div><strong>Blue for info & tips.</strong>Sparingly. User input tag. "Heads up" panels. The fox's ears.</div></div>
+        <div className="rule yes"><div><strong>Semantic (ok/warn/err) is free.</strong>Green checkmarks, red errors — these don't count against the accent budget. They're status, not brand.</div></div>
+        <div className="rule no"><div><strong>Never gradient-blend brand colors.</strong>Orange → yellow, orange → nothing. Surface-on-surface gradients are allowed in hero cards.</div></div>
+      </div>
+    </Section>
+
+    {/* ═══════════════ 03 — Type ═══════════════ */}
+    <Section num="03" title="Typography" sub="Three-family stack. Silkscreen for pixel moments & headers. Space Grotesk for all UI. JetBrains Mono for agent logs, code, timestamps, meta-info.">
+      <TypeSpec label="Hero / Big Numbers" sample="847" font={FX.pixel} size={56} weight={400} tracking={1} usage="Reserved for hero moments — big number reveals, splash screens. Never body copy." />
+      <TypeSpec label="Pixel H1" sample="PIXELFOXX" font={FX.pixel} size={22} weight={400} tracking={1} usage="Product logo, section titles in design system, pixel moments. Always uppercase." />
+      <TypeSpec label="Pixel H2" sample="FOXX NEEDS YOU" font={FX.pixel} size={13} weight={400} tracking={0.5} usage="Modal headers, highest-attention moments. Yellow bg when paired with Safety Yellow." />
+      <TypeSpec label="UI H1" sample="Job Hunt — Senior Frontend" font={FX.ui} size={13} weight={600} usage="Panel titles, playbook names. Title case, tight tracking." />
+      <TypeSpec label="UI Body" sample="well, hey there partner." font={FX.ui} size={13} weight={400} usage="Foxx speech, user messages, prose. Always lowercase in Foxx's voice." />
+      <TypeSpec label="UI Small" sample="i'll skim, summarize, archive the noise." font={FX.ui} size={11} weight={400} usage="Secondary copy inside cards. Line-height 1.5." />
+      <TypeSpec label="Mono Label" sample="UNREAD · 847" font={FX.mono} size={10} weight={500} tracking={0.5} usage="All-caps labels, chips, timestamps. 0.5px tracking. Muted color." />
+      <TypeSpec label="Mono Log" sample="14:03  OBS  scraped 47 listings" font={FX.mono} size={11} weight={400} usage="Agent log lines, terminal output. Never italicized." />
+
+      <div className="card" style={{ marginTop: 20 }}>
+        <div className="ds-h3">Rules</div>
+        <div className="rule yes"><div><strong>Body minimum 11px.</strong>UI prose, chat bubbles, list items. 12–13px is the comfort zone.</div></div>
+        <div className="rule yes"><div><strong>Mono labels can go to 8px.</strong>Dense meta, URL strips, status timestamps. Mono is denser than UI and stays legible smaller. Never smaller than 8px.</div></div>
+        <div className="rule no"><div><strong>Never use Silkscreen for body.</strong>It's a paint, not a font. Pixel type = numbers, short labels, and short pixel-moment headers (H1/H2, modal titles). Never full sentences.</div></div>
+        <div className="rule yes"><div><strong>Lowercase Foxx, Title Case UI, UPPERCASE pixel.</strong>Foxx speaks lowercase prose. Playbook names and stats are Title Case. Anything set in Silkscreen is ALL CAPS.</div></div>
+      </div>
+    </Section>
+
+    {/* ═══════════════ 04 — Spacing & Shape ═══════════════ */}
+    <Section num="04" title="Spacing & Shape" sub="Chunky pixel corners instead of rounded radii. 4px base grid. Clip-path does the visual work — no actual border-radius anywhere.">
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 20 }}>
+        <div className="card">
+          <div className="ds-h3">Pixel Corners</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.55, marginBottom: 14 }}>
+            Every card, button, modal, chip uses <code className="inline">PIXEL_CORNERS</code> — a 3px diagonal clip-path. Gives an 8-bit "bitten" corner instead of a rounded one.
+          </div>
+          <div style={{ display: 'flex', gap: 10 }}>
+            <div style={{ width: 80, height: 48, background: FX.orange, clipPath: 'polygon(0 3px,3px 3px,3px 0,calc(100% - 3px) 0,calc(100% - 3px) 3px,100% 3px,100% calc(100% - 3px),calc(100% - 3px) calc(100% - 3px),calc(100% - 3px) 100%,3px 100%,3px calc(100% - 3px),0 calc(100% - 3px))' }}/>
+            <div style={{ width: 80, height: 48, background: FX.yellow, clipPath: 'polygon(0 3px,3px 3px,3px 0,calc(100% - 3px) 0,calc(100% - 3px) 3px,100% 3px,100% calc(100% - 3px),calc(100% - 3px) calc(100% - 3px),calc(100% - 3px) 100%,3px 100%,3px calc(100% - 3px),0 calc(100% - 3px))' }}/>
+            <div style={{ width: 80, height: 48, background: FX.surface, border: `1px solid ${FX.line}`, clipPath: 'polygon(0 3px,3px 3px,3px 0,calc(100% - 3px) 0,calc(100% - 3px) 3px,100% 3px,100% calc(100% - 3px),calc(100% - 3px) calc(100% - 3px),calc(100% - 3px) 100%,3px 100%,3px calc(100% - 3px),0 calc(100% - 3px))' }}/>
+          </div>
+        </div>
+        <div className="card">
+          <div className="ds-h3">Spacing Scale (4px base)</div>
+          <table className="token-table">
+            <tbody>
+              <tr><td>4</td><td>4px</td><td>chip gap, dense grids</td></tr>
+              <tr><td>6</td><td>6px</td><td>between stacked pills</td></tr>
+              <tr><td>8</td><td>8px</td><td>button icon gap, list rows</td></tr>
+              <tr><td>10/12</td><td>10–12px</td><td>card padding, comfortable list</td></tr>
+              <tr><td>14/16</td><td>14–16px</td><td>section gaps, modal padding</td></tr>
+              <tr><td>20/24</td><td>20–24px</td><td>panel padding, hero space</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="card">
+        <div className="ds-h3">Panel Frame Spec</div>
+        <div style={{ display: 'flex', gap: 20, alignItems: 'center' }}>
+          <div style={{ width: 80, height: 148, background: FX.surface, border: `1px solid ${FX.line2}`, position: 'relative' }}>
+            <div style={{ position: 'absolute', top: 6, left: 6, right: 6, height: 14, background: FX.orange, opacity: 0.3 }}/>
+            <div style={{ position: 'absolute', top: 26, left: 6, right: 6, bottom: 26, background: FX.bg }}/>
+            <div style={{ position: 'absolute', bottom: 6, left: 6, right: 6, height: 14, background: FX.orange, opacity: 0.3 }}/>
+          </div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.7 }}>
+            <div>Width <code className="inline">400px</code> · Height <code className="inline">740px</code> — Chrome side panel.</div>
+            <div>Header strip <code className="inline">48px</code> · Footer strip <code className="inline">52px</code>.</div>
+            <div>Content padding <code className="inline">12–14px</code> horizontal, <code className="inline">14–20px</code> vertical.</div>
+            <div>Popup: <code className="inline">320×420</code>. HUD: <code className="inline">320×80</code>.</div>
+          </div>
+        </div>
+      </div>
+    </Section>
+
+    {/* ═══════════════ 05 — Components ═══════════════ */}
+    <Section num="05" title="Components" sub="The full primitive set. Everything's in primitives.jsx — import by reference, don't re-roll.">
+
+      <div className="ds-h3">PixelButton — 5 variants × 3 sizes</div>
+      <div className="demo-row">
+        <PixelButton variant="primary" icon="play">Primary</PixelButton>
+        <PixelButton variant="yellow" icon="bolt">Yellow</PixelButton>
+        <PixelButton variant="default" icon="folder">Default</PixelButton>
+        <PixelButton variant="ghost" icon="history">Ghost</PixelButton>
+        <PixelButton variant="danger" icon="close">Danger</PixelButton>
+      </div>
+      <div className="demo-row">
+        <PixelButton variant="primary" size="sm" icon="plus">sm</PixelButton>
+        <PixelButton variant="primary" size="md" icon="plus">md (default)</PixelButton>
+        <PixelButton variant="primary" size="lg" icon="plus">lg</PixelButton>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Chip — mono status pill</div>
+      <div className="demo-row">
+        <Chip><Dot color={FX.ok}/> ON</Chip>
+        <Chip color={FX.ok} bg="rgba(127,212,107,0.15)"><Dot color={FX.ok}/> DONE</Chip>
+        <Chip color={FX.orange} bg="rgba(255,106,26,0.15)"><Dot color={FX.orange} pulse/> LIVE</Chip>
+        <Chip color={FX.yellow} bg="rgba(255,200,61,0.15)">PAUSED</Chip>
+        <Chip color={FX.err} bg="rgba(255,90,78,0.15)">ERROR</Chip>
+        <Chip bg={FX.surface3} color={FX.textDim}>⌘↵</Chip>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Mascot — mood-tinted avatar</div>
+      <div className="demo-row">
+        <div style={{textAlign:'center'}}><Mascot size={56} mood="chill"/><div className="demo-caption">chill</div></div>
+        <div style={{textAlign:'center'}}><Mascot size={56} mood="hype"/><div className="demo-caption">hype</div></div>
+        <div style={{textAlign:'center'}}><Mascot size={56} mood="work"/><div className="demo-caption">work</div></div>
+        <div style={{textAlign:'center'}}><Mascot size={56} mood="error"/><div className="demo-caption">error</div></div>
+        <div style={{marginLeft: 20, fontSize: 11, color: FX.textMute, fontFamily: FX.mono, lineHeight: 1.7 }}>
+          <div>32px — inline in chat rows</div>
+          <div>40–48px — bubbles, modals</div>
+          <div>52–70px — onboarding, hero moments</div>
+        </div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Icon — 21-icon pixel set (16px viewBox)</div>
+      <div className="demo-row" style={{flexWrap:'wrap', gap: 16 }}>
+        {['play','pause','stop','record','plus','search','chevron','down','close','check','clock','bolt','history','settings','more','cursor','tab','chain','globe','keyboard','folder','arrow','dots'].map(n => (
+          <div key={n} style={{textAlign:'center', minWidth: 48}}>
+            <div style={{ padding: 6, background: FX.surface2, display: 'inline-block' }}><Icon name={n} size={16} color={FX.text}/></div>
+            <div className="demo-caption">{n}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Speech Bubble — Foxx narration</div>
+      <div className="demo-row">
+        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', width: '100%' }}>
+          <Mascot size={40} mood="chill"/>
+          <div style={{ flex: 1, background: FX.surface, border: `1px solid ${FX.line}`, padding: '10px 12px', clipPath: 'polygon(0 3px,3px 3px,3px 0,calc(100% - 3px) 0,calc(100% - 3px) 3px,100% 3px,100% calc(100% - 3px),calc(100% - 3px) calc(100% - 3px),calc(100% - 3px) 100%,3px 100%,3px calc(100% - 3px),0 calc(100% - 3px))', fontSize: 12.5, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 9.5, color: FX.orange, fontFamily: FX.mono, letterSpacing: 0.4, marginBottom: 4 }}>FOXX &gt;</div>
+            alright partner, poking at the page now. give me a sec.
+          </div>
+        </div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Variable Pill</div>
+      <div className="demo-row">
+        <div style={{ padding: '5px 8px', background: 'rgba(255,200,61,0.1)', border: `1px solid ${FX.yellow}`, fontFamily: FX.mono, fontSize: 10 }}>
+          <span style={{ color: FX.yellow }}>{"{{keywords}}"}</span>
+          <span style={{ color: FX.textDim, marginLeft: 6 }}>Senior Frontend Eng</span>
+        </div>
+        <div className="demo-caption">Yellow border + yellow brackets · variables in playbooks</div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>PixelProgress — segmented bar</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <PixelProgress value={4} total={6} color={FX.orange}/>
+        <PixelProgress value={7} total={10} color={FX.yellow}/>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>PixelDivider</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <PixelDivider/>
+        <div className="demo-caption">Dashed pixel divider · section breaks inside panels</div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Step-Type Chip — for playbook editor</div>
+      <div className="demo-row">
+        {[['NAV',FX.blue],['IN',FX.yellow],['CLK',FX.orange],['SCRP',FX.yellow],['IF',FX.err],['AI',FX.ok],['OUT',FX.orange]].map(([l,c]) => (
+          <div key={l} style={{ minWidth: 34, textAlign: 'center', fontSize: 9.5, fontWeight: 700, color: '#14110E', background: c, padding: '3px 6px', fontFamily: FX.mono }}>{l}</div>
+        ))}
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Log Tag — terminal stream</div>
+      <div className="demo-row" style={{ background: FX.bg, fontFamily: FX.mono, fontSize: 11, flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
+        <div><span style={{color: FX.textMute}}>14:01</span>&nbsp; <span style={{color: FX.orange}}>ACT</span>&nbsp;&nbsp;opened linkedin.com/jobs</div>
+        <div><span style={{color: FX.textMute}}>14:01</span>&nbsp; <span style={{color: FX.blue}}>OBS</span>&nbsp;&nbsp;47 listings loaded</div>
+        <div><span style={{color: FX.textMute}}>14:02</span>&nbsp; <span style={{color: FX.textMute}}>THK</span>&nbsp;&nbsp;filtering for remote…</div>
+        <div><span style={{color: FX.textMute}}>14:02</span>&nbsp; <span style={{color: FX.yellow}}>SAY</span>&nbsp;&nbsp;the vercel one looks spicy, partner</div>
+        <div><span style={{color: FX.textMute}}>14:03</span>&nbsp; <span style={{color: FX.ok}}>USR</span>&nbsp;&nbsp;skip the startups</div>
+      </div>
+
+      {/* ── NEW v1.1 primitives ─────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>UserAvatar — identity chip · NEW v1.1</div>
+      <div className="demo-row">
+        <div style={{textAlign:'center'}}>{window.UserAvatar && <window.UserAvatar size={22}/>}<div className="demo-caption">22px · header</div></div>
+        <div style={{textAlign:'center'}}>{window.UserAvatar && <window.UserAvatar size={32}/>}<div className="demo-caption">32px · inline</div></div>
+        <div style={{textAlign:'center'}}>{window.UserAvatar && <window.UserAvatar size={44}/>}<div className="demo-caption">44px · profile card</div></div>
+        <div style={{ marginLeft: 20, fontSize: 11, color: FX.textMute, fontFamily: FX.mono, lineHeight: 1.7 }}>
+          <div>Blue surface + initials (max 2) · pixel corners</div>
+          <div>22px — side panel header slot</div>
+          <div>32px — chat author marker, permission lists</div>
+          <div>44px — settings profile card hero</div>
+          <div>Fallback when Google avatar URL missing</div>
+        </div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>PixelToggle — binary switch · NEW v1.1</div>
+      <div className="demo-row">
+        {window.PixelToggle && <><window.PixelToggle on={true}/><window.PixelToggle on={false}/></>}
+        <div style={{ marginLeft: 20, fontSize: 11, color: FX.textMute, fontFamily: FX.mono, lineHeight: 1.7 }}>
+          <div>32×16 · 12×12 knob · steps(2) transition</div>
+          <div>ON: orange bg + dark knob</div>
+          <div>OFF: surface3 bg + muted knob</div>
+          <div>Use for preferences, notifications, auto-pause.</div>
+        </div>
+      </div>
+    </Section>
+
+    {/* ═══════════════ 05b — Composite Components ═══════════════ */}
+    <Section num="05b" title="Composite Components" sub="Bigger prefab blocks — assembled from primitives and used across screens. Copy these as-is; don't rebuild.">
+
+      {/* ── Modal Shell ─────────────────────────────── */}
+      <div className="ds-h3">Modal Shell — yellow alert header</div>
+      <div className="demo-row" style={{ background: 'rgba(0,0,0,0.4)', padding: 20, justifyContent: 'center' }}>
+        <div style={{ width: 340, background: FX.surface, border: `2px solid ${FX.yellow}`, boxShadow: '0 8px 0 rgba(0,0,0,0.4)', clipPath: PIXEL_CORNERS }}>
+          <div style={{ padding: '10px 12px', background: FX.yellow, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ width: 8, height: 8, background: '#14110E', animation: 'fx-pulse 1s steps(2) infinite' }}/>
+              <div style={{ fontFamily: FX.mono, fontSize: 10, fontWeight: 700, color: '#14110E', letterSpacing: 0.5 }}>AGENT PAUSED · 00:03</div>
+            </div>
+            <Icon name="close" size={12} color="#14110E"/>
+          </div>
+          <div style={{ padding: 14 }}>
+            <div style={{ fontSize: 12.5, color: FX.text, lineHeight: 1.5 }}>this login wants a code. mind grabbing it?</div>
+          </div>
+        </div>
+        <div className="demo-caption">Yellow bar · pulsing dot · paused timer · 2px border · shadow offset</div>
+      </div>
+
+      {/* ── Screenshot Preview ──────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Screenshot Preview Block</div>
+      <div className="demo-row">
+        <div style={{ width: 260, height: 140, background: FX.bg, backgroundImage: DITHER_BG, border: `1px solid ${FX.line}`, padding: 10, position: 'relative' }}>
+          <div style={{ fontFamily: FX.mono, fontSize: 8, color: FX.textMute, letterSpacing: 0.5, marginBottom: 6 }}>LINKEDIN.COM/JOBS</div>
+          <div style={{ height: 6, width: '70%', background: FX.line2, marginBottom: 4 }}/>
+          <div style={{ height: 6, width: '55%', background: FX.line2, marginBottom: 10 }}/>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+            {[0,1,2,3].map(i => <div key={i} style={{ height: 22, background: FX.surface, border: `1px solid ${FX.line}` }}/>)}
+          </div>
+          <div style={{ position: 'absolute', top: 10, right: 10, fontFamily: FX.mono, fontSize: 8, background: FX.orange, color: '#14110E', padding: '2px 4px' }}>LIVE</div>
+        </div>
+        <div className="demo-caption">Dither bg · mono URL label · skeleton content · optional live badge. Used in run detail, takeover.</div>
+      </div>
+
+      {/* ── Stats Strip ─────────────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Stats Strip — 3-column metrics</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', background: FX.surface, border: `1px solid ${FX.line}` }}>
+          {[['STEPS','4/6',FX.orange],['TIME','4:05',FX.text],['SAVED','$12',FX.ok]].map(([l,v,c],i) => (
+            <div key={l} style={{ padding: '10px 12px', textAlign: 'center', borderLeft: i ? `1px solid ${FX.line}` : 'none' }}>
+              <div style={{ fontFamily: FX.mono, fontSize: 9, color: FX.textMute, letterSpacing: 0.5, marginBottom: 4 }}>{l}</div>
+              <div style={{ fontFamily: FX.pixel, fontSize: 18, color: c }}>{v}</div>
+            </div>
+          ))}
+        </div>
+        <div className="demo-caption">Divided grid · mono label + pixel number. Use for run summaries, history rows.</div>
+      </div>
+
+      {/* ── Page Context Strip ──────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Page Context Strip — current tab</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', background: FX.surface, borderBottom: `1px solid ${FX.line}`, fontFamily: FX.mono, fontSize: 9.5, color: FX.textMute, letterSpacing: 0.5 }}>
+          <Icon name="globe" size={10} color={FX.textMute}/>
+          <span>ON:</span>
+          <span style={{ color: FX.text }}>linkedin.com/jobs</span>
+          <span style={{ marginLeft: 'auto', color: FX.ok }}>● reading</span>
+        </div>
+        <div className="demo-caption">Under header · globe + hostname + live read indicator.</div>
+      </div>
+
+      {/* ── Tab Nav ─────────────────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Tab Nav — underline pattern</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <div style={{ display: 'flex', background: FX.surface, borderBottom: `1px solid ${FX.line}` }}>
+          {['LIVE','PLAYBOOKS','HISTORY'].map((t,i) => (
+            <div key={t} style={{ flex: 1, padding: '10px 0', textAlign: 'center', fontFamily: FX.mono, fontSize: 10, fontWeight: 600, letterSpacing: 0.5, color: i===0 ? FX.orange : FX.textMute, borderBottom: i===0 ? `2px solid ${FX.orange}` : '2px solid transparent' }}>{t}</div>
+          ))}
+        </div>
+        <div className="demo-caption">Equal-width tabs · 2px orange underline on active · uppercase mono.</div>
+      </div>
+
+      {/* ── Progress Ring ───────────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Progress Ring — circular step counter</div>
+      <div className="demo-row">
+        {[[4,6,FX.orange],[8,8,FX.ok],[2,10,FX.yellow]].map(([v,t,c],i) => {
+          const r = 22, circ = 2*Math.PI*r, off = circ - (v/t)*circ;
+          return (
+            <div key={i} style={{ position: 'relative', width: 56, height: 56 }}>
+              <svg width={56} height={56} style={{ transform: 'rotate(-90deg)' }}>
+                <circle cx={28} cy={28} r={r} stroke={FX.line2} strokeWidth={4} fill="none"/>
+                <circle cx={28} cy={28} r={r} stroke={c} strokeWidth={4} fill="none" strokeDasharray={circ} strokeDashoffset={off} strokeLinecap="square"/>
+              </svg>
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: FX.pixel, fontSize: 14, color: c }}>{v}/{t}</div>
+            </div>
+          );
+        })}
+        <div className="demo-caption">Square line-caps keep the pixel feel · pixel font numeral in center.</div>
+      </div>
+
+      {/* ── Action Card (inline tool call) ─────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Action Card — inline tool call in chat</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+        {[
+          ['NAV','linkedin.com/jobs', FX.blue, 'done'],
+          ['FILTER','remote · past 24h · senior', FX.blue, 'done'],
+          ['EXTRACT','scanning 47 listings…', FX.yellow, 'running'],
+        ].map(([tag, body, color, status]) => (
+          <div key={tag} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: FX.surface, border: `1px solid ${FX.line}`, clipPath: PIXEL_CORNERS }}>
+            <div style={{ minWidth: 46, textAlign: 'center', fontFamily: FX.mono, fontSize: 9, fontWeight: 700, letterSpacing: 0.4, padding: '3px 4px', background: color, color: '#14110E' }}>{tag}</div>
+            <div style={{ flex: 1, fontFamily: FX.mono, fontSize: 11, color: FX.text }}>{body}</div>
+            <Dot color={status==='running' ? FX.orange : FX.ok} pulse={status==='running'}/>
+          </div>
+        ))}
+        <div className="demo-caption">Type chip (same palette as playbook editor) · mono body · status dot (pulsing when live).</div>
+      </div>
+
+      {/* ── User Message + Quick Reply ──────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>User Message Bubble + Quick-Reply Chips</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+          <div style={{ maxWidth: '78%', background: FX.orange, color: '#14110E', padding: '7px 10px', fontSize: 12, lineHeight: 1.4, clipPath: PIXEL_CORNERS }}>skip the startups, focus on series B+</div>
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 4 }}>
+          {['looks good, keep going','skip this one','show me the list','take over'].map(s => (
+            <div key={s} style={{ padding: '5px 9px', background: FX.surface2, border: `1px solid ${FX.line2}`, fontSize: 11, color: FX.text, clipPath: PIXEL_CORNERS, cursor: 'pointer' }}>{s}</div>
+          ))}
+        </div>
+        <div className="demo-caption">User msg = orange block, right-aligned · Quick replies = tappable chip row, surface2 bg.</div>
+      </div>
+
+      {/* ── Result Summary Card ─────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Result Summary Card</div>
+      <div className="demo-row">
+        <div style={{ width: '100%', background: FX.surface, border: `1px solid ${FX.ok}`, padding: 12, clipPath: PIXEL_CORNERS }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <Icon name="check" size={10} color={FX.ok}/>
+            <div style={{ fontFamily: FX.mono, fontSize: 9.5, color: FX.ok, letterSpacing: 0.5 }}>FOUND 9 MATCHES</div>
+            <div style={{ marginLeft: 'auto', fontFamily: FX.mono, fontSize: 9, color: FX.textMute }}>3:42</div>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {[['Vercel','Senior FE · Remote','92'],['Linear','Staff FE · Remote','88'],['Retool','FE Lead · NYC','81']].map(([co, role, score]) => (
+              <div key={co} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, padding: '4px 0', borderBottom: `1px dashed ${FX.line}` }}>
+                <div style={{ fontWeight: 600, color: FX.text, minWidth: 60 }}>{co}</div>
+                <div style={{ flex: 1, color: FX.textDim }}>{role}</div>
+                <div style={{ fontFamily: FX.pixel, fontSize: 12, color: FX.ok }}>{score}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="demo-caption">Green border on success · count header + timing · dashed row separators.</div>
+      </div>
+
+      {/* ── Playbook Card ───────────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Playbook Card — library tile</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+        {[
+          ['Job Hunt — Senior Frontend','research', 42, '2m ago', 6, FX.orange, 'running'],
+          ['Inbox Triage','email', 128, '3h ago', 8, FX.yellow, null],
+        ].map(([name, tag, runs, last, steps, color, status]) => (
+          <div key={name} style={{ padding: '10px 12px', background: FX.surface, border: `1px solid ${FX.line}`, borderLeft: `3px solid ${color}` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <div style={{ fontWeight: 600, fontSize: 12.5, color: FX.text, flex: 1 }}>{name}</div>
+              {status && <Dot color={FX.orange} pulse/>}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontFamily: FX.mono, fontSize: 9.5, color: FX.textMute, letterSpacing: 0.3 }}>
+              <span style={{ color }}>#{tag}</span>
+              <span>{steps} STEPS</span>
+              <span>{runs} RUNS</span>
+              <span style={{ marginLeft: 'auto' }}>{last}</span>
+            </div>
+          </div>
+        ))}
+        <div className="demo-caption">3px left border in tag color · title row with live dot · mono meta row.</div>
+      </div>
+
+      {/* ── History Run Row ─────────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>History Run Row</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 0 }}>
+        {[
+          ['Job Hunt — Senior Frontend','ok','2d ago','3:14','6/6','9 matches'],
+          ['Inbox Triage','ok','3h ago','1:42','8/8','32 emails handled'],
+          ['Price Watcher','err','1d ago','0:48','2/4','timeout on amazon'],
+        ].map(([play, s, when, dur, steps, out],i) => {
+          const c = s==='ok' ? FX.ok : s==='err' ? FX.err : FX.orange;
+          return (
+            <div key={i} style={{ padding: '9px 12px', background: FX.surface, borderBottom: `1px solid ${FX.line}`, display: 'grid', gridTemplateColumns: '10px 1fr auto', gap: 10, alignItems: 'center' }}>
+              <Dot color={c}/>
+              <div>
+                <div style={{ fontSize: 12, color: FX.text, fontWeight: 500 }}>{play}</div>
+                <div style={{ fontFamily: FX.mono, fontSize: 9.5, color: FX.textMute, letterSpacing: 0.3, marginTop: 2 }}>{when} · {dur} · {steps} · {out}</div>
+              </div>
+              <Icon name="chevron" size={10} color={FX.textMute}/>
+            </div>
+          );
+        })}
+        <div className="demo-caption">Status dot · play name + mono meta line · chevron affordance.</div>
+      </div>
+
+      {/* ── Hero Status Card ────────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Hero Status Card — focus view</div>
+      <div className="demo-row">
+        <div style={{ width: '100%', padding: '16px 14px 14px', background: `linear-gradient(180deg, ${FX.surface2} 0%, ${FX.surface} 100%)`, border: `1px solid ${FX.orange}` }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+            <Mascot size={44} mood="work"/>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontFamily: FX.mono, fontSize: 9, color: FX.orange, letterSpacing: 0.5, marginBottom: 2 }}>CURRENT STEP · 4/6</div>
+              <div style={{ fontSize: 13.5, color: FX.text, fontWeight: 600, lineHeight: 1.3 }}>ranking top matches…</div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontFamily: FX.pixel, fontSize: 22, color: FX.orange, lineHeight: 1 }}>4:05</div>
+              <div style={{ fontFamily: FX.mono, fontSize: 8.5, color: FX.textMute, letterSpacing: 0.5 }}>ELAPSED</div>
+            </div>
+          </div>
+          <div style={{ fontSize: 11.5, color: FX.textDim, fontStyle: 'italic', lineHeight: 1.4 }}>"vercel and linear lookin' sharp. stripe wants a cover letter — mind?"</div>
+        </div>
+        <div className="demo-caption">Gradient surface · orange border · mascot + step label + big timer · italic Foxx caption.</div>
+      </div>
+
+      {/* ── Foxx Thinking Indicator ─────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Foxx Thinking — chat loading animation</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <Mascot size={32} mood="chill" style={{ marginTop: 2 }} />
+          <div style={{ background: FX.surface, border: `1px solid ${FX.line}`, padding: '11px 14px', clipPath: PIXEL_CORNERS, display: 'flex', gap: 5, alignItems: 'center' }}>
+            {[0, 160, 320].map(d => (
+              <div key={d} style={{ width: 6, height: 6, background: FX.orange, animation: `fxPulse 1.2s ${d}ms ease-in-out infinite` }} />
+            ))}
+          </div>
+        </div>
+        <div className="demo-caption">32px mascot + speech bubble · three 6×6 orange squares pulsing at 160ms offsets · shown while Foxx is working on a reply.</div>
+      </div>
+
+      {/* ── Session Divider ─────────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Session Divider — chat breaks</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '8px 0' }}>
+          <div style={{ flex: 1, height: 1, background: FX.line }}/>
+          <div style={{ fontFamily: FX.mono, fontSize: 9, color: FX.textMute, letterSpacing: 0.6 }}>SESSION STARTED · 14:01</div>
+          <div style={{ flex: 1, height: 1, background: FX.line }}/>
+        </div>
+        <div className="demo-caption">Thin line · mono caps label · used to separate chat sessions in live view.</div>
+      </div>
+
+      {/* ── Takeover Action Row ─────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Takeover Action Row — stacked alt buttons</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+        {[
+          ['cursor','take over','i\'ll watch and learn','⌘T'],
+          ['bolt','skip this step','try the next one instead','⌘→'],
+          ['stop','stop the run','save what you\'ve got','⌘.'],
+        ].map(([ic, label, sub, kbd]) => (
+          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', background: FX.surface, border: `1px solid ${FX.line}`, cursor: 'pointer' }}>
+            <div style={{ width: 28, height: 28, background: FX.surface2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name={ic} size={14} color={FX.text}/>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12.5, color: FX.text, fontWeight: 500 }}>{label}</div>
+              <div style={{ fontSize: 11, color: FX.textDim, marginTop: 1 }}>{sub}</div>
+            </div>
+            <Chip bg={FX.surface3} color={FX.textDim}>{kbd}</Chip>
+          </div>
+        ))}
+        <div className="demo-caption">Icon slot · label + sublabel · keyboard shortcut chip on right. Used in takeover modal, confirmation flows.</div>
+      </div>
+
+      {/* ── Big Step Row ────────────────────────────── */}
+      <div className="ds-h3" style={{marginTop:20}}>Big Step Row — live progress</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
+        {[
+          [1, 'Open LinkedIn jobs search', 'done', '0:12', null],
+          [2, 'Apply filters: Remote, Past 24h', 'done', '0:04', '47 listings found'],
+          [3, 'Extract + rank top matches', 'running', '0:32', 'scanning 47…'],
+          [4, 'Draft outreach notes', 'queued', null, null],
+        ].map(([n, text, s, time, detail]) => {
+          const border = s === 'running' ? FX.orange : FX.line;
+          const bg = s === 'running' ? 'rgba(255,106,26,0.07)' : s === 'done' ? FX.surface : 'transparent';
+          const numC = s === 'done' ? FX.ok : s === 'running' ? FX.orange : FX.textMute;
+          return (
+            <div key={n} style={{ display: 'flex', gap: 10, padding: '9px 10px', background: bg, border: `1px solid ${border}`, borderLeft: `3px solid ${border}`, alignItems: 'flex-start' }}>
+              <div style={{ fontFamily: FX.pixel, fontSize: 13, color: numC, minWidth: 18 }}>{s==='done' ? '✓' : n}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12.5, color: s==='queued' ? FX.textMute : FX.text, lineHeight: 1.35, textDecoration: s==='done' ? 'line-through' : 'none' }}>{text}</div>
+                {detail && <div style={{ fontFamily: FX.mono, fontSize: 10, color: FX.textDim, marginTop: 3 }}>↳ {detail}</div>}
+              </div>
+              {time && <div style={{ fontFamily: FX.mono, fontSize: 9.5, color: FX.textMute }}>{time}</div>}
+            </div>
+          );
+        })}
+        <div className="demo-caption">3px left border · done = strikethrough + check · running = orange bg tint · detail line with arrow.</div>
+      </div>
+
+      {/* ══════════ NEW v1.1 — Settings/Permissions/Errors ══════════ */}
+      <div style={{ marginTop: 28, padding: '10px 12px', background: 'rgba(255,106,26,0.08)', border: `1px dashed ${FX.orange}`, fontFamily: FX.mono, fontSize: 10, color: FX.orange, letterSpacing: 0.4 }}>
+        NEW IN v1.1 · IDENTITY + ERRORS
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Back Header — sub-screen chrome</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+        <div style={{ padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: `1px solid ${FX.line}`, background: FX.surface }}>
+          <div style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Icon name="chevron" size={14} color={FX.textDim} style={{ transform: 'rotate(90deg)' }}/>
+          </div>
+          <div style={{ fontFamily: FX.pixel, fontSize: 11, letterSpacing: 0.6, color: FX.text }}>SETTINGS</div>
+        </div>
+        <div className="demo-caption">Rotated chevron as back · pixel-font uppercase title · no logo. Use for Settings, Permissions, Run Detail, Playbook Editor.</div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Setting Row — label + value/kbd/toggle</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 0 }}>
+        {[
+          ['Default mode', 'chat', null, null],
+          ['Voice', 'nick wilde — chill', null, null],
+          ['Auto-pause on risky actions', null, null, true],
+          ['Open side panel', null, '⌘⇧F', null],
+        ].map(([label, value, kbd, toggle]) => (
+          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', borderTop: `1px solid ${FX.line}`, background: FX.surface }}>
+            <div style={{ flex: 1, fontSize: 12.5, color: FX.text }}>{label}</div>
+            {value && <div style={{ fontFamily: FX.mono, fontSize: 10.5, color: FX.textDim }}>{value}</div>}
+            {kbd && <Chip bg={FX.surface3} color={FX.textDim}>{kbd}</Chip>}
+            {toggle && window.PixelToggle && <window.PixelToggle on={true}/>}
+            {!toggle && !kbd && <Icon name="chevron" size={10} color={FX.textMute}/>}
+          </div>
+        ))}
+        <div className="demo-caption">Label-left, control-right · top border acts as separator · chevron affordance on navigable rows.</div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Danger Row — destructive actions</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+        {[
+          ['Clear run history', 'keeps playbooks · wipes logs', FX.textMute, FX.text],
+          ['Sign out', 'see you around, anna', FX.textMute, FX.text],
+          ['Delete account', 'everything goes. no coming back.', FX.err, FX.err],
+        ].map(([label, sub, border, color]) => (
+          <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: FX.surface, border: `1px solid ${FX.line}`, borderLeft: `3px solid ${border}` }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 12.5, color, fontWeight: 500 }}>{label}</div>
+              <div style={{ fontSize: 10.5, color: FX.textDim, marginTop: 2 }}>{sub}</div>
+            </div>
+            <Icon name="chevron" size={10} color={FX.textMute}/>
+          </div>
+        ))}
+        <div className="demo-caption">3px left border · gray for reversible, red for final · label + sub line. Always grouped under "DANGER ZONE" label.</div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Permission Row — site access tile</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
+        {[
+          ['linkedin.com', 12, '2m ago', 'FULL', FX.ok],
+          ['amazon.com', 3, '1w ago', 'READ', FX.yellow],
+          ['x.com', 2, '1w ago', 'BLOCKED', FX.err],
+        ].map(([host, runs, when, level, color]) => (
+          <div key={host} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '11px 12px', background: FX.surface, border: `1px solid ${FX.line}`, borderLeft: `3px solid ${color}` }}>
+            <div style={{ width: 22, height: 22, background: FX.surface2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Icon name="globe" size={12} color={FX.textDim}/>
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12, color: FX.text, fontWeight: 500 }}>{host}</div>
+              <div style={{ fontFamily: FX.mono, fontSize: 9.5, color: FX.textMute, letterSpacing: 0.3, marginTop: 1 }}>{runs} RUNS · {when}</div>
+            </div>
+            <div style={{ padding: '3px 6px', background: color, color: '#14110E', fontFamily: FX.mono, fontSize: 8.5, fontWeight: 700, letterSpacing: 0.4 }}>{level}</div>
+            <Icon name="more" size={12} color={FX.textMute}/>
+          </div>
+        ))}
+        <div className="demo-caption">Site favicon slot · host + runs/recency · level badge in semantic color · more menu. Level border matches badge.</div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Filter Tab Chips — list filters</div>
+      <div className="demo-row">
+        {[['ALL · 7', true], ['FULL · 4', false], ['READ · 2', false], ['BLOCKED · 1', false]].map(([t, active], i) => (
+          <div key={i} style={{ padding: '5px 9px', background: active ? FX.orange : FX.surface2, color: active ? '#14110E' : FX.textDim, fontFamily: FX.mono, fontSize: 9.5, fontWeight: 600, letterSpacing: 0.4, clipPath: PIXEL_CORNERS }}>{t}</div>
+        ))}
+        <div className="demo-caption">Label · count · orange active. Use above any list with {"<20"} items.</div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Status Strip — tinted alert banner</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+        {[
+          ['OFFLINE · RECONNECTING…', FX.err],
+          ['STUCK · 30s ON ONE STEP', FX.yellow],
+          ['PAUSED · RATE LIMITED', FX.yellow],
+          ['RUNNING · 4 OF 6', FX.orange],
+        ].map(([text, color]) => (
+          <div key={text} style={{ padding: '8px 14px', background: `${color}22`, borderTop: `1px solid ${color}`, borderBottom: `1px solid ${color}`, display: 'flex', alignItems: 'center', gap: 8, fontFamily: FX.mono, fontSize: 9.5, color, letterSpacing: 0.5 }}>
+            <div style={{ width: 6, height: 6, background: color, animation: 'fxPulse 1s steps(2) infinite' }}/>{text}
+          </div>
+        ))}
+        <div className="demo-caption">Tinted bg (<code className="inline">{"{color}22"}</code>) + matching 1px borders · pulsing 6px square + mono caps label. Sits directly under the header on error/stuck/running states.</div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Tech Detail Strip — selector / error code</div>
+      <div className="demo-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+        {[
+          [FX.err, "selector: button[data-ctrl='filter-apply']"],
+          [FX.yellow, '429 Too Many Requests · retry in 1:47'],
+          [FX.err, 'runtime error · #a9f2b · report sent'],
+        ].map(([color, text], i) => (
+          <div key={i} style={{ padding: '8px 12px', background: FX.bg, border: `1px solid ${FX.line}`, fontFamily: FX.mono, fontSize: 9.5, color: FX.textMute, letterSpacing: 0.3 }}>
+            <span style={{ color }}>▸</span> {text}
+          </div>
+        ))}
+        <div className="demo-caption">Colored arrow marker + mono text on dark bg. Use once per error screen — the raw reason Foxx shares after their in-character explanation.</div>
+      </div>
+
+      <div className="ds-h3" style={{marginTop:20}}>Error Frame — full-canvas recovery layout</div>
+      <div className="demo-row" style={{ alignItems: 'flex-start', gap: 16 }}>
+        <div style={{ width: 260, background: FX.bg, border: `1px solid ${FX.line}`, display: 'flex', flexDirection: 'column' }}>
+          {/* header */}
+          <div style={{ padding: '10px 12px', background: FX.surface, borderBottom: `1px solid ${FX.line}`, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ fontFamily: FX.pixel, fontSize: 11, letterSpacing: 0.5 }}>PIXEL<span style={{ color: FX.orange }}>FOXX</span></div>
+            <div style={{ flex: 1 }}/>
+            {window.UserAvatar && <window.UserAvatar size={18}/>}
+          </div>
+          {/* status strip */}
+          <div style={{ padding: '6px 12px', background: `${FX.err}22`, borderBottom: `1px solid ${FX.err}`, fontFamily: FX.mono, fontSize: 8.5, color: FX.err, letterSpacing: 0.5, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 5, height: 5, background: FX.err, animation: 'fxPulse 1s steps(2) infinite' }}/>OFFLINE · RECONNECTING…
+          </div>
+          {/* hero */}
+          <div style={{ padding: '20px 14px', textAlign: 'center' }}>
+            <Mascot size={56} mood="error" style={{ marginBottom: 10 }}/>
+            <div style={{ fontFamily: FX.pixel, fontSize: 11, color: FX.err, letterSpacing: 0.5, marginBottom: 8 }}>LOST THE SIGNAL</div>
+            <div style={{ fontSize: 10.5, color: FX.text, lineHeight: 1.5, marginBottom: 10 }}>hey anna, your wifi took a coffee break.</div>
+            <div style={{ padding: '6px 8px', background: FX.surface, border: `1px solid ${FX.line}`, textAlign: 'left', marginBottom: 8 }}>
+              <div style={{ fontFamily: FX.mono, fontSize: 7.5, color: FX.textMute, letterSpacing: 0.5, marginBottom: 2 }}>LAST STEP</div>
+              <div style={{ fontSize: 9.5, color: FX.textDim }}>Step 4 of 6 — ranking top matches</div>
+            </div>
+          </div>
+          {/* actions */}
+          <div style={{ padding: 10, background: FX.surface, borderTop: `1px solid ${FX.line}`, display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <div style={{ padding: '6px 10px', background: FX.orange, color: '#14110E', fontSize: 10, fontWeight: 600, textAlign: 'center', clipPath: PIXEL_CORNERS }}>retry now</div>
+            <div style={{ padding: '6px 10px', background: 'transparent', border: `1px solid ${FX.line2}`, color: FX.textDim, fontSize: 10, textAlign: 'center', clipPath: PIXEL_CORNERS }}>save &amp; close</div>
+          </div>
+        </div>
+        <div style={{ flex: 1, fontSize: 11.5, color: FX.textDim, lineHeight: 1.7 }}>
+          <div style={{ fontFamily: FX.mono, fontSize: 10, color: FX.text, marginBottom: 8, letterSpacing: 0.4 }}>ANATOMY</div>
+          <div>① Header with <strong>user avatar</strong> (anchors identity — not a logo)</div>
+          <div>② <strong>Status strip</strong> — what's wrong, in one mono caps line</div>
+          <div>③ <strong>Mood mascot</strong> (56–88px) — mood matches severity</div>
+          <div>④ <strong>Pixel title</strong> — Foxx's caps reaction, 3–4 words</div>
+          <div>⑤ <strong>Body copy</strong> — voice-in, uses first name, max 2 sentences</div>
+          <div>⑥ <strong>Last step card</strong> — context so user knows what's paused</div>
+          <div>⑦ <strong>Tech detail</strong> — optional raw reason (selector, code)</div>
+          <div>⑧ <strong>Recovery stack</strong> — primary CTA + ghost fallback</div>
+        </div>
+      </div>
+
+    </Section>
+
+    {/* ═══════════════ 06 — Patterns ═══════════════ */}
+    <Section num="06" title="Patterns & Layouts" sub="Repeating compositions. When in doubt, reach for one of these before inventing something new.">
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        <div className="card">
+          <div className="ds-h3">Panel Shell</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.6 }}>
+            <code className="inline">header</code> (logo + actions) → <code className="inline">tab nav</code> (optional) → <code className="inline">mode switcher</code> (optional) → <code className="inline">context strip</code> (optional) → <code className="inline">scroll body</code> → <code className="inline">footer CTA</code>.
+            Always fixed 400×740. Header/footer stick; body scrolls.
+          </div>
+        </div>
+        <div className="card">
+          <div className="ds-h3">Mascot Moment</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.6 }}>
+            Mascot (40–48px) + speech bubble side-by-side. <code className="inline">FOXX &gt;</code> label in orange mono above the line. Bubble uses <code className="inline">surface</code> bg + pixel corners.
+          </div>
+        </div>
+        <div className="card">
+          <div className="ds-h3">Hero Stat Card</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.6 }}>
+            Tiny mono label → huge pixel-font number (44–56px) → italic Foxx caption under. Orange border. Use once per screen max.
+          </div>
+        </div>
+        <div className="card">
+          <div className="ds-h3">Accent-Bordered List Row</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.6 }}>
+            <code className="inline">surface</code> bg + <code className="inline">3px left border</code> in semantic color (type-chip matches). Drag handle, label chip, body, meta — in that order.
+          </div>
+        </div>
+        <div className="card">
+          <div className="ds-h3">Info Strip</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.6 }}>
+            Tinted bg (<code className="inline">rgba(brand, 0.08)</code>) + 1px matching border. First word colored, rest dim. For "heads up", tips, "remember me" callouts.
+          </div>
+        </div>
+        <div className="card">
+          <div className="ds-h3">Mode Switcher Strip</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.6 }}>
+            Horizontal row of mono-uppercase 10px labels. Active = orange bg + dark text. Placed immediately under tab nav.
+          </div>
+        </div>
+        <div className="card">
+          <div className="ds-h3">Identity Placement · NEW v1.1</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.6 }}>
+            Avatar lives in <strong>three spots</strong>: side panel header (right slot, 22px), settings profile card (44px hero), and error-screen header (18–22px, replaces live chip). Foxx uses <strong>first name once signed in</strong> — <code className="inline">anna</code> not <code className="inline">partner</code>. Pre-auth &amp; onboarding keep the <code className="inline">partner</code> fallback.
+          </div>
+        </div>
+        <div className="card">
+          <div className="ds-h3">Error State · NEW v1.1</div>
+          <div style={{ fontSize: 12, color: FX.textDim, lineHeight: 1.6 }}>
+            <strong>Foxx owns the failure.</strong>Every error screen follows the Error Frame anatomy: status strip → mood mascot → pixel title → in-voice body with user's name → context card → optional tech detail → primary recovery CTA + ghost fallback. Never "Error 500 occurred." Always a recovery path.
+          </div>
+        </div>
+      </div>
+    </Section>
+
+    {/* ═══════════════ 07 — Do / Don't ═══════════════ */}
+    <Section num="07" title="Do / Don't" sub="Hard rules to keep the system tight as it scales.">
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        <div className="card">
+          <div className="ds-h3" style={{ color: FX.ok }}>✓ Do</div>
+          <div className="rule yes"><div>Use <strong>orange + one support accent max</strong> (yellow OR blue). Semantic colors don't count.</div></div>
+          <div className="rule yes"><div>Reach for <strong>existing primitives</strong> before writing new CSS.</div></div>
+          <div className="rule yes"><div><strong>Lowercase</strong> anything Foxx says.</div></div>
+          <div className="rule yes"><div>Use <strong>pixel font for numbers, short labels, and pixel-moment headers</strong> — never body.</div></div>
+          <div className="rule yes"><div><strong>Mascot in live/hero moments gets a voiced line.</strong>In list/table views, silent mascot is fine.</div></div>
+          <div className="rule yes"><div>Prefer <strong>clip-path pixel corners</strong> over border-radius.</div></div>
+          <div className="rule yes"><div><strong>Greet by first name</strong> once signed in — lowercase, no decoration. <code className="inline">partner</code> is pre-auth only.</div></div>
+          <div className="rule yes"><div><strong>Every error gets a recovery path.</strong>Primary CTA forward, ghost fallback back. Foxx owns the failure in voice.</div></div>
+        </div>
+        <div className="card">
+          <div className="ds-h3" style={{ color: FX.err }}>✗ Don't</div>
+          <div className="rule no"><div>No <strong>brand-color gradients</strong>. Subtle surface-on-surface is the one exception.</div></div>
+          <div className="rule no"><div>No <strong>emoji</strong> (unless the user types them).</div></div>
+          <div className="rule no"><div>No <strong>Silkscreen prose</strong>. Short labels only — never a sentence.</div></div>
+          <div className="rule no"><div>No <strong>rounded corners</strong>. Use PIXEL_CORNERS.</div></div>
+          <div className="rule no"><div>No <strong>three brand accents at once</strong>. Orange + one support, that's the budget.</div></div>
+          <div className="rule no"><div>No <strong>generic AI tropes</strong> — sparkle icons, "✨ magic", brain emojis.</div></div>
+        </div>
+      </div>
+    </Section>
+
+    {/* ═══════════════ 08 — Building ═══════════════ */}
+    <Section num="08" title="Building a New Screen" sub="Copy-paste checklist. Every new panel should pass this list before ship.">
+      <div className="card">
+        <div className="ds-h3">Recipe</div>
+        <ol style={{ paddingLeft: 22, fontSize: 12.5, color: FX.textDim, lineHeight: 1.9 }}>
+          <li>Start with the <code className="inline">frame</code> wrapper (400×740, FX.bg, DITHER_BG backgroundImage).</li>
+          <li>Add a <strong>header strip</strong> — logo or back arrow on left, 1–2 actions on right.</li>
+          <li>If it's live work, add a <strong>mascot moment</strong> in the first 120px.</li>
+          <li>Main content: scroll area with <strong>12–14px horizontal padding</strong>.</li>
+          <li>Break content with <strong>mono section labels</strong> (10px, textMute, uppercase, 0.5 tracking).</li>
+          <li>End with a <strong>footer action row</strong> — 2–3 buttons, orange primary on the right.</li>
+          <li>If the screen has a user context, <strong>place the avatar in the header right slot</strong> (22px) and use the signed-in first name in Foxx's copy.</li>
+          <li>Run the <strong>color rule</strong> — orange + one support accent (yellow or blue), max. Semantic colors are free.</li>
+          <li>Voice-check Foxx's lines — <strong>lowercase, short, dry</strong>.</li>
+        </ol>
+      </div>
+    </Section>
+
+    <div style={{ textAlign: 'center', padding: '40px 0', color: FX.textMute, fontFamily: FX.mono, fontSize: 10, letterSpacing: 0.5 }}>
+      <Mascot size={44} mood="chill" style={{ margin: '0 auto 16px' }}/>
+      <div>END OF DESIGN SYSTEM · v1.1</div>
+      <div style={{ marginTop: 4, color: FX.line2 }}>tokens.jsx · primitives.jsx · pixel corners forever</div>
+    </div>
+  </div>
+);
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
