@@ -34,17 +34,18 @@ from typing import Any
 
 from anthropic import Anthropic
 
-from mocks import execute_programmatic
+from backend_tools import execute_backend_tool
 from session_store import PlanStep, Session
 from tools import ALL_TOOLS
 
 # Programmatic primitives split by WHERE they run.
 # Backend-executed run in our process (workspace hits Google via gspread,
-# vision hits Gemini Flash). Browser-executed must round-trip through the
-# extension via CDP/content-script.
-BACKEND_EXECUTED_TOOLS = {"workspace", "vision"}
+# vision hits Gemini Flash, secret reads env). Browser-executed must
+# round-trip through the extension via CDP/content-script.
+BACKEND_EXECUTED_TOOLS = {"workspace", "vision", "secret"}
 BROWSER_EXECUTED_TOOLS = {
-    "navigate", "click", "type", "key", "scroll", "observe", "reauth_google"
+    "navigate", "click", "type", "key", "scroll", "observe",
+    "wait_for", "list_tabs", "switch_tab", "reauth_google",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,9 +117,30 @@ def build_container(session: Session) -> dict[str, Any] | None:
 
 SYSTEM_PROMPT = """You are Pixel Foxx, an autonomous browser-automation agent.
 
-You work by calling tools and reading skills. The skills folder contains markdown files (with optional Python helpers) that teach you HOW and WHEN to use the tools for specific situations.
+# Operating principles (apply to every action)
 
-Every turn pairs a one-line `chat` narration with a concrete tool call. Run plans to completion — pause only for: plan-level approval, a destructive action, a genuine pathway fork, or the final report."""
+1. **Compose.** Bundle related primitive calls into ONE code-execution block. Each separate model round-trip costs ~2s of latency and one turn of context. Six awaits in one Python block = one round-trip from your perspective.
+
+2. **Predict, then verify only on contradiction.** Before acting, state in one short sentence what you expect to happen. After acting, re-observe ONLY if the actual result contradicted your prediction. Your primitives verify themselves: `type` returns `ok:false` if the value didn't land; `click` returns `url_changed`; trust these. Don't observe to "be sure". **Back-to-back observes are a hard failure** — if you observed last turn, do NOT observe again this turn unless an action since then plausibly changed the page shape (and even then: ONE observe, not two).
+
+3. **Snapshot beats screenshot.** Default `observe(include=["snapshot"])`. Add `"screenshot"` only when (a) you need vision — captcha, visual layout, color state — or (b) as terminal evidence in the report. Never as a verification crutch.
+
+4. **Skills are your prelude.** When you're about to do something for the first time in a session — touch the browser, write to a sheet, handle a captcha — `read_skill` for the relevant skill FIRST. Skills contain canonical recipes; copy them verbatim when they fit. Don't re-derive what a skill already solved.
+
+5. **Pair narration with action.** Every `chat()` must accompany a tool call in the same turn. Chat-alone turns are a hard failure (they look like progress to the user but produce nothing).
+
+# Stop conditions
+
+Only pause execution for ONE of:
+- `request_approval(scope="plan")` — once at session start, after `set_plan`.
+- `request_approval(scope="todo", reason=<destructive>)` — only for destructive/irreversible actions (sends_message, submits_payment, deletes_data, posts_publicly, external_write, irreversible_state_change).
+- `clarify(question, why, options=[≥2])` — only when there's a genuine pathway fork with real tradeoffs.
+- `report(...)` — terminal, when the plan is complete.
+
+# Verbosity
+
+Default to terse output. Long explanations belong in `report()` at the end, not in the working chat. Match response length to task: simple tasks get one chat per turn, not three.
+"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -147,6 +169,25 @@ def _extract_caller_type(block: Any) -> str | None:
 def _ok_result(tool_use_id: str, payload: dict | str | None = None) -> dict:
     content = json.dumps(payload or {"ok": True}) if not isinstance(payload, str) else payload
     return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
+
+
+def _redact_args_for_log(name: str, args: dict) -> dict:
+    """Strip sensitive args from action-log entries the UI renders."""
+    if name == "secret":
+        return {"name": args.get("name"), "_redacted": True}
+    if name == "vision":
+        # image_b64 is huge AND can leak PII (screenshot); drop from log.
+        return {k: v for k, v in args.items() if k not in ("image_b64",)}
+    if name == "type":
+        # The text being typed may be a password/token. Show length only.
+        text = args.get("text") or ""
+        return {
+            "ref": args.get("ref"),
+            "text_len": len(text),
+            "submit": bool(args.get("submit")),
+            "_text_redacted": True,
+        }
+    return args
 
 
 def _apply_set_plan(session: Session, args: dict) -> None:
@@ -288,13 +329,14 @@ def drive_turn(
                     })
                     continue
                 if name in BACKEND_EXECUTED_TOOLS:
-                    # Backend handles inline (workspace/vision). Mocks for now.
+                    # Backend handles inline. Real impls for vision + secret;
+                    # workspace still mocks until we wire access tokens.
                     session.actions.append({
                         "kind": "programmatic",
                         "name": name,
-                        "args": args,
+                        "args": _redact_args_for_log(name, args),
                     })
-                    result = execute_programmatic(name, args)
+                    result = execute_backend_tool(name, args, session)
                     tool_results.append(_ok_result(block.id, result))
                     continue
                 # Unknown programmatic tool — return error so the loop unblocks.

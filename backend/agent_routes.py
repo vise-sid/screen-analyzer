@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from agent import drive_turn
 from auth import AuthenticatedUser, require_user
+from session_logger import dump_screenshot, log_turn
 from session_store import Session, create_session, get_session
 
 router = APIRouter(prefix="/sessions", tags=["agent"])
@@ -51,7 +52,7 @@ class SessionEnvelope(BaseModel):
 
 
 def envelope(s: Session) -> SessionEnvelope:
-    return SessionEnvelope(
+    env = SessionEnvelope(
         session_id=s.id,
         status=s.status,
         chats=list(s.chats),
@@ -64,6 +65,8 @@ def envelope(s: Session) -> SessionEnvelope:
         final_report=s.final_report,
         updated_at=s.updated_at,
     )
+    log_turn(s.id, env.model_dump())
+    return env
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
@@ -142,6 +145,15 @@ def step(
                 status_code=400,
                 detail=f"missing tool_use_ids in browser_results: {sorted(missing)}",
             )
+        # Sniff for screenshots from observe() and dump them. We tag with the
+        # turn index for ordering.
+        s._screenshot_seq = getattr(s, "_screenshot_seq", 0)  # type: ignore[attr-defined]
+        for r in req.browser_results:
+            content = r.get("content")
+            if isinstance(content, dict) and content.get("screenshot_b64"):
+                s._screenshot_seq += 1  # type: ignore[attr-defined]
+                label = f"obs_{s._screenshot_seq:02d}"  # type: ignore[attr-defined]
+                dump_screenshot(s.id, label, content["screenshot_b64"])
         drive_turn(s, browser_results=req.browser_results)
         return envelope(s)
 

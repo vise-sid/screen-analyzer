@@ -29,9 +29,11 @@ app.add_middleware(
 
 from auth_routes import router as auth_router  # noqa: E402
 from agent_routes import router as agent_router  # noqa: E402
+from vision_helper.routes import router as vision_router  # noqa: E402
 
 app.include_router(auth_router)
 app.include_router(agent_router)
+app.include_router(vision_router)
 
 
 @app.get("/health")

@@ -46,35 +46,87 @@ NAVIGATE = {
     "allowed_callers": ["code_execution_20260120"],
 }
 
+# Locators use the `by` parameter to map directly to Playwright's preferred
+# locator builders (page.getByRole / getByLabel / getByPlaceholder / etc.).
+# This avoids the string-selector grammar trap entirely.
+_LOCATOR_PROPS = {
+    "by": {
+        "type": "string",
+        "enum": ["role", "label", "placeholder", "text", "testid", "css"],
+        "description": (
+            "Locator strategy — maps 1:1 to Playwright methods: "
+            "role→getByRole, label→getByLabel, placeholder→getByPlaceholder, "
+            "text→getByText, testid→getByTestId, css→raw CSS (escape hatch)."
+        ),
+    },
+    "name": {
+        "type": "string",
+        "description": (
+            "The accessible name / label / placeholder / text / testid value. "
+            "Required for by ∈ {role, label, placeholder, text, testid}. "
+            "For by=role, this is the accessible name (e.g. 'LOGIN' for a button)."
+        ),
+    },
+    "role": {
+        "type": "string",
+        "description": (
+            "ARIA role (only used when by='role'). E.g. 'button', 'textbox', 'link', 'checkbox'."
+        ),
+    },
+    "exact": {
+        "type": "boolean",
+        "description": "Exact match for name/text? Default false (case-insensitive substring).",
+        "default": False,
+    },
+    "selector": {
+        "type": "string",
+        "description": "Raw CSS selector (only used when by='css').",
+    },
+    "n": {
+        "type": "integer",
+        "description": "Pick the nth match (0-indexed). Default 0 — i.e. first match.",
+        "default": 0,
+    },
+}
+
 CLICK = {
     "name": "click",
-    "description": "Click an element identified by its accessibility ref (from a prior observe() snapshot).",
+    "description": (
+        "Click an element. Uses Playwright's recommended locator methods "
+        "(getByRole, getByLabel, etc.) — no selector strings. Auto-waits for "
+        "actionability. Returns ok:false with a clear error if no element matches."
+    ),
     "input_schema": {
         "type": "object",
-        "properties": {"ref": {"type": "string"}},
-        "required": ["ref"],
+        "properties": _LOCATOR_PROPS,
+        "required": ["by"],
     },
     "allowed_callers": ["code_execution_20260120"],
 }
 
 TYPE = {
     "name": "type",
-    "description": "Focus a field by ref and type text. Set submit=true to press Enter after.",
+    "description": (
+        "Focus a field via locator and type text with real keystrokes (per-char "
+        "jitter, dispatches keydown/keyup the way humans do). Verifies the "
+        "value actually landed in the field — returns ok:false if length "
+        "mismatch. Set submit=true to press Enter after typing."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "ref": {"type": "string"},
-            "text": {"type": "string"},
-            "submit": {"type": "boolean", "default": False},
+            **_LOCATOR_PROPS,
+            "text": {"type": "string", "description": "Text to type (real keystrokes)."},
+            "submit": {"type": "boolean", "default": False, "description": "Press Enter after typing?"},
         },
-        "required": ["ref", "text"],
+        "required": ["by", "text"],
     },
     "allowed_callers": ["code_execution_20260120"],
 }
 
 KEY = {
     "name": "key",
-    "description": "Press a single key on the focused element. Examples: 'Enter', 'Escape', 'ArrowDown', 'Tab'.",
+    "description": "Press a key on the active element. Examples: 'Enter', 'Escape', 'ArrowDown', 'Tab'.",
     "input_schema": {
         "type": "object",
         "properties": {"key": {"type": "string"}},
@@ -90,6 +142,73 @@ SCROLL = {
         "type": "object",
         "properties": {"deltaY": {"type": "integer"}},
         "required": ["deltaY"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+LIST_TABS = {
+    "name": "list_tabs",
+    "description": (
+        "List all open browser tabs. Returns {ok, tabs: [{id, url, title, active, agent_attached}, ...]}. "
+        "Use this BEFORE opening a new tab — if the target site is already open in another tab, "
+        "switch to it via switch_tab(tab_id=...) instead of navigate()."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+SWITCH_TAB = {
+    "name": "switch_tab",
+    "description": (
+        "Attach the agent's browser session to an existing tab by id (from list_tabs). "
+        "All subsequent navigate / click / observe / type / etc. operate on this tab. "
+        "Returns {ok, url, title}. Fails if the tab doesn't exist or is on a restricted URL "
+        "(chrome://, about:, etc)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tab_id": {"type": "integer", "description": "The tab id from list_tabs()."},
+        },
+        "required": ["tab_id"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+WAIT_FOR = {
+    "name": "wait_for",
+    "description": (
+        "Wait for a condition on the page. Three modes: "
+        "(1) wait for a locator's state — pass `by`+`name`/`role`/`selector` and "
+        "`state` ∈ {visible, hidden, attached, detached}. "
+        "(2) wait for URL — pass `url_pattern` (substring or regex). "
+        "(3) wait for load state — pass `load_state` ∈ {load, domcontentloaded, networkidle}. "
+        "All wait modes auto-retry until the condition holds or timeout."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            **_LOCATOR_PROPS,
+            "state": {
+                "type": "string",
+                "enum": ["visible", "hidden", "attached", "detached"],
+                "description": "Locator state to wait for (used with by/name/etc).",
+            },
+            "url_pattern": {
+                "type": "string",
+                "description": "Substring of the page URL to wait for (e.g. '/dashboard').",
+            },
+            "load_state": {
+                "type": "string",
+                "enum": ["load", "domcontentloaded", "networkidle"],
+                "description": "Page load state to wait for.",
+            },
+            "timeout_ms": {
+                "type": "integer",
+                "description": "Max wait time. Default 8000.",
+                "default": 8000,
+            },
+        },
     },
     "allowed_callers": ["code_execution_20260120"],
 }
@@ -129,6 +248,28 @@ VISION = {
             "prompt": {"type": "string", "description": "Optional prompt for 'describe' task."},
         },
         "required": ["task", "image_b64"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+SECRET = {
+    "name": "secret",
+    "description": (
+        "Fetch a secret value (credential, API key, etc.) from the backend's "
+        "secret store by name. The value is returned ONLY to your code-execution "
+        "sandbox — it never enters your main conversation context. Use this for "
+        "passwords, API tokens, anything you must not see in chat. Allowed names "
+        "are limited; see error messages for the allowlist."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Secret name from the backend allowlist (e.g. GST_TEST_PASSWORD).",
+            },
+        },
+        "required": ["name"],
     },
     "allowed_callers": ["code_execution_20260120"],
 }
@@ -269,8 +410,9 @@ REPORT = {
 # ── The full toolset the agent sees ───────────────────────────────────────
 
 PROGRAMMATIC_TOOLS = [
-    OBSERVE, NAVIGATE, CLICK, TYPE, KEY, SCROLL,
-    WORKSPACE, REAUTH_GOOGLE, VISION,
+    OBSERVE, NAVIGATE, CLICK, TYPE, KEY, SCROLL, WAIT_FOR,
+    LIST_TABS, SWITCH_TAB,
+    WORKSPACE, REAUTH_GOOGLE, VISION, SECRET,
 ]
 
 DIRECT_TOOLS = [CHAT, SET_PLAN, REQUEST_APPROVAL, CLARIFY, DONE, REPORT]
