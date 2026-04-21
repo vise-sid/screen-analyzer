@@ -62,6 +62,50 @@ async function attachDebugger(tabId) {
 
   // Apply stealth patches to avoid anti-bot detection
   await applyStealthPatches();
+
+  // Force "Request Desktop Site" mode — UA + viewport + touch off.
+  // Some sites (IRCTC, gov portals, older SPAs) serve a mobile-lite layout
+  // when the UA looks mobile-ish or the viewport is narrow, even on actual
+  // desktop browsers. This forces them to serve the full desktop experience.
+  await applyDesktopSiteMode();
+}
+
+/**
+ * Tell the page it's running in a desktop browser at 1920x1080, regardless
+ * of the actual window size or sidepanel-squeezed viewport. Equivalent to
+ * Chrome's "Request Desktop Site" option from the mobile menu.
+ */
+async function applyDesktopSiteMode() {
+  try {
+    // Desktop Chrome on Win10 — most broadly accepted "I'm a real desktop" UA
+    const DESKTOP_UA =
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
+    await sendCommand("Network.setUserAgentOverride", {
+      userAgent: DESKTOP_UA,
+      platform: "Win32",
+      acceptLanguage: "en-US,en;q=0.9",
+    });
+
+    // Force a desktop-shaped viewport. mobile:false is the critical bit —
+    // it tells the rendering engine to treat the page as desktop regardless
+    // of media queries or touch hints.
+    await sendCommand("Emulation.setDeviceMetricsOverride", {
+      width: 1920,
+      height: 1080,
+      deviceScaleFactor: 1,
+      mobile: false,
+      screenWidth: 1920,
+      screenHeight: 1080,
+    });
+
+    // Ensure touch isn't emulated — some sites switch to mobile UI on touch.
+    await sendCommand("Emulation.setTouchEmulationEnabled", { enabled: false });
+
+    console.log("[actions] desktop-site mode applied");
+  } catch (e) {
+    console.warn("[actions] applyDesktopSiteMode failed:", e);
+  }
 }
 
 /**

@@ -45,6 +45,12 @@ let sessionId = null;
 let running = false;
 let currentAbort = null;
 let renderedMessageIds = new Set();
+// Heartbeat-watchdog signals (consumed by the setInterval at file bottom).
+// Updated inside driveAgentStep after every step.
+let lastAgentActivityAt = null;   // ms timestamp of last successful step
+let agentStuckFlag = false;       // true when an exception bailed driveAgentStep, OR when a step ended with no tool calls + tiny chat (garbage tokens)
+let lastActionFailed = false;     // true when the most recent action batch had ≥1 failure
+let lastSessionSnapshot = null;   // {activeTodoId, todos, status} from last step
 // Tracks optimistic user bubbles (content → count). When a matching
 // server-persisted user message arrives from /agent/step, we consume one
 // entry and skip re-rendering so the UI doesn't double.
@@ -525,9 +531,17 @@ async function driveAgentStep(firstPayload) {
     }
   };
 
+  agentStuckFlag = false;
+  lastActionFailed = false;
   try {
     for (let iter = 0; iter < MAX_ACTION_ITERATIONS; iter++) {
       const result = await postAgentStep(payload);
+      lastAgentActivityAt = Date.now();
+      lastSessionSnapshot = {
+        activeTodoId: result.session?.active_todo_id || null,
+        todos: result.session?.todo_plan?.todos || [],
+        status: result.session?.status || null,
+      };
 
       renderMessages(result.messages || []);
       setTodoPlan(result.session.todo_plan, result.session.active_todo_id);
@@ -554,23 +568,38 @@ async function driveAgentStep(firstPayload) {
 
       const pending = result.pending_actions || [];
       if (!pending.length) {
-        // Agent emitted text only — turn is done.
+        // Agent emitted text only — turn is done from the API's view, but if
+        // the last assistant chat is empty/tiny (garbage tokens like "_", "9",
+        // "{thought"), the model is stuck on response generation rather than
+        // genuinely finished. Mark agentStuckFlag so the heartbeat watchdog
+        // nudges it within ~10s instead of waiting the full idle threshold.
+        const lastAssistantChat = (result.messages || [])
+          .filter((m) => m.role === "assistant" && m.message_type === "chat")
+          .map((m) => (m.content || "").trim())
+          .pop();
+        if (lastAssistantChat !== undefined && lastAssistantChat.length < 20) {
+          console.log("[heartbeat] garbage response detected:", JSON.stringify(lastAssistantChat));
+          agentStuckFlag = true;
+        }
         return;
       }
 
       // Execute each browser action the agent asked for. Thinking indicator
       // stays alive — gets bumped below each new action bubble.
       const action_results = [];
+      let batchHadFailure = false;
       for (const pa of pending) {
         const bubble = addActionBubble(pa.name, pa.args || {});
         bumpThinking();
         try {
           const response = await handlePendingAction(pa.name, pa.args || {});
           const ok = response && response.ok !== false;
+          if (!ok) batchHadFailure = true;
           markActionBubble(bubble, ok ? "ok" : "fail", response);
           action_results.push({ call_id: pa.call_id, name: pa.name, response });
         } catch (err) {
           console.error(`action ${pa.name} failed`, err);
+          batchHadFailure = true;
           markActionBubble(bubble, "fail", { error: err.message || String(err) });
           action_results.push({
             call_id: pa.call_id,
@@ -580,9 +609,13 @@ async function driveAgentStep(firstPayload) {
         }
         bumpThinking();
       }
+      lastActionFailed = batchHadFailure;
       payload = { user_message: null, action_results };
     }
     addBubble("assistant", "(hit the step cap — taking a breath.)", { cls: "system" });
+  } catch (err) {
+    agentStuckFlag = true;
+    throw err;
   } finally {
     thinking?.remove();
   }
@@ -1208,3 +1241,143 @@ stopBtn?.addEventListener("click", () => {
 });
 
 bootstrapAuth();
+
+// ── Heartbeat watchdog ─────────────────────────────────────────
+// Self-heal nudge for the two stall patterns we see in production:
+//   (1) garbage-token response (output_tokens ~ 1-3, no tool calls) — model
+//       reasoning is fine but token generation hiccupped. We detect this in
+//       driveAgentStep and set agentStuckFlag → fast nudge after 10s.
+//   (2) silent idle — agent ended with text only and is genuinely waiting.
+//       Slow nudge after 45s.
+// Without this, the user has to type "continue" manually to unstick the
+// session. With this, the loop self-recovers.
+const HEARTBEAT_TICK_MS = 5_000;
+const HEARTBEAT_STUCK_MS = 10_000;  // fast: when we have a definite stuck signal
+const HEARTBEAT_IDLE_MS = 45_000;   // slow: pure idleness with no other signal
+
+// Backoff + safety rails to prevent runaway heartbeat spam on persistent
+// server errors (e.g. 429 daily-cap, network flake, auth issue).
+let heartbeatPausedUntil = 0;         // epoch ms; heartbeat skips firing until after this
+let consecutiveHeartbeats = 0;        // resets on user message / successful real action
+const MAX_CONSECUTIVE_HEARTBEATS = 3; // 3 back-to-back → pause until user intervenes
+
+setInterval(() => {
+  if (running) return;
+  if (!sessionId) return;
+  if (pendingApprovalBubble) return;
+  if (lastAgentActivityAt == null) return;
+  if (Date.now() < heartbeatPausedUntil) return;
+  if (consecutiveHeartbeats >= MAX_CONSECUTIVE_HEARTBEATS) return;
+
+  const idleMs = Date.now() - lastAgentActivityAt;
+  const snap = lastSessionSnapshot;
+  const hasStalledTodo =
+    snap &&
+    snap.status !== "ready_to_save" &&
+    snap.status !== "saved" &&
+    snap.status !== "completed" &&
+    (snap.todos || []).some((t) => {
+      const s = (t?.status || "pending").toLowerCase();
+      return s !== "done" && s !== "failed" && s !== "skipped";
+    });
+  const stuckSignal = agentStuckFlag || lastActionFailed || hasStalledTodo;
+
+  let shouldFire = false;
+  if (stuckSignal && idleMs >= HEARTBEAT_STUCK_MS) shouldFire = true;
+  else if (idleMs >= HEARTBEAT_IDLE_MS) shouldFire = true;
+
+  if (!shouldFire) return;
+
+  consecutiveHeartbeats += 1;
+  console.log("[heartbeat] firing", {
+    idleMs,
+    stuckSignal,
+    consecutive: consecutiveHeartbeats,
+    activeTodoId: snap?.activeTodoId,
+    status: snap?.status,
+  });
+
+  agentStuckFlag = false;
+  lastActionFailed = false;
+  lastAgentActivityAt = Date.now();
+
+  let nudge =
+    "[HEARTBEAT] You went silent. Remember: you are an agent, not a chatbot. " +
+    "Resume with the next concrete tool call for the active todo. " +
+    "Valid next moves: (a) the next browser action, " +
+    "(b) mark_todo_done + start the next todo's first tool IN THE SAME TURN, " +
+    "(c) ask_advisor if you're genuinely stuck after two distinct attempts, " +
+    "(d) clarify(question, why) if there's a real fork with ≥2 options, " +
+    "(e) save_playbook if all todos are done. " +
+    "Do NOT reply chat-only. Do NOT ask the user what to do — they already approved the plan.";
+  if (hasStalledTodo && snap?.activeTodoId) {
+    const active = (snap.todos || []).find((t) => t.id === snap.activeTodoId);
+    if (active) {
+      nudge += ` Active todo: "${active.title || active.id}" (status=${active.status || "pending"}).`;
+    }
+  }
+
+  setRunning(true);
+  driveAgentStep({ user_message: nudge, action_results: [] })
+    .then(() => {
+      // Success path — a full agent turn completed. If that turn produced
+      // actual forward progress (tool calls + no stuck flags), the streak
+      // resets naturally on the next user message. Otherwise the counter
+      // ticks up toward MAX_CONSECUTIVE_HEARTBEATS.
+    })
+    .catch((e) => {
+      const msg = e?.message || String(e);
+      // Hard-pause on daily-cap (429) — no point retrying the same minute.
+      // Pause until midnight UTC OR 30 minutes, whichever is shorter.
+      if (msg.includes("429") || msg.toLowerCase().includes("daily spend") || msg.toLowerCase().includes("cap")) {
+        heartbeatPausedUntil = Date.now() + 30 * 60_000;
+        addBubble("assistant",
+          "Heartbeat paused (daily spend cap reached). Raise DAILY_LIMIT_FREE_USD env or wait for reset. " +
+          "Nudges resume when you send your next message.",
+          { cls: "error" });
+      } else {
+        // Generic error — exponential-ish backoff: 60s × consecutive count, capped at 10min
+        const cooldownMs = Math.min(60_000 * consecutiveHeartbeats, 600_000);
+        heartbeatPausedUntil = Date.now() + cooldownMs;
+        addBubble("assistant",
+          `Heartbeat nudge failed: ${msg}. Paused ${Math.round(cooldownMs / 1000)}s before retry.`,
+          { cls: "error" });
+      }
+    })
+    .finally(() => setRunning(false));
+}, HEARTBEAT_TICK_MS);
+
+// Reset heartbeat streak + unpause whenever the USER sends a message.
+// The user typing means they're engaged; the runaway-heartbeat protection
+// should yield to human input.
+(function installHeartbeatResetOnUserSend() {
+  const origSendMessage = window.sendMessage;
+  if (typeof origSendMessage === "function") {
+    window.sendMessage = async function () {
+      consecutiveHeartbeats = 0;
+      heartbeatPausedUntil = 0;
+      return origSendMessage.apply(this, arguments);
+    };
+  }
+  // Also reset on the bound send-button handler — sendMessage is locally
+  // scoped so the window.sendMessage hook only catches if it was exposed.
+  // Belt-and-braces: attach a capture-phase click on sendBtn.
+  sendBtn?.addEventListener(
+    "click",
+    () => {
+      consecutiveHeartbeats = 0;
+      heartbeatPausedUntil = 0;
+    },
+    true,
+  );
+  taskInput?.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        consecutiveHeartbeats = 0;
+        heartbeatPausedUntil = 0;
+      }
+    },
+    true,
+  );
+})();
