@@ -169,63 +169,120 @@ async function getCachedUser() {
 async function signOut() {
   cachedIdToken = null;
   cachedAccessToken = null;
-  await chrome.storage.local.remove([STORAGE_KEY, USER_STORAGE_KEY]);
-  try {
-    // Best-effort revoke of the Workspace access token too.
-    const existing = await new Promise((resolve) => {
-      chrome.identity.getAuthToken({ interactive: false }, (t) => resolve(t));
-    });
-    if (existing) {
-      await new Promise((resolve) => {
-        chrome.identity.removeCachedAuthToken({ token: existing }, resolve);
-      });
-    }
-  } catch (_) {}
+  accessTokenEntry = null;
+  await chrome.storage.local.remove([STORAGE_KEY, USER_STORAGE_KEY, ACCESS_STORAGE_KEY]);
 }
 
 // ── Access token (for Google Workspace APIs) ───────────────────────────────
-// Unchanged from the previous implementation — Workspace APIs need
-// access_tokens via the Chrome Extension OAuth client from manifest.json.
+// Uses chrome.identity.launchWebAuthFlow against the SAME Web Application
+// OAuth client we use for the ID token (WEB_CLIENT_ID above). The manifest's
+// chrome-extension oauth2.client_id is rejected by GCP as "bad client id" —
+// routing Workspace auth through launchWebAuthFlow avoids it entirely.
+//
+// For this to work, the Web Application client in GCP must have the
+// Workspace scopes enabled (spreadsheets, documents, presentations,
+// drive.file) and `https://<extension-id>.chromiumapp.org/` registered as
+// an Authorized redirect URI. See docs/setup.md.
 
-async function getGoogleAuthToken() {
-  if (cachedAccessToken) {
-    try {
-      const resp = await fetch(
-        "https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=" +
-          cachedAccessToken
-      );
-      if (resp.ok) return cachedAccessToken;
-    } catch (_) {}
-    cachedAccessToken = null;
-  }
+const WORKSPACE_SCOPES = [
+  "https://www.googleapis.com/auth/spreadsheets",
+  "https://www.googleapis.com/auth/documents",
+  "https://www.googleapis.com/auth/presentations",
+  "https://www.googleapis.com/auth/drive.file",
+].join(" ");
 
+const ACCESS_STORAGE_KEY = "pixelfoxx_access_token";
+let accessTokenEntry = null; // { token, expiresAt }
+
+function isAccessFresh(entry) {
+  if (!entry || !entry.token || !entry.expiresAt) return false;
+  return Date.now() < entry.expiresAt - 60_000; // 60s early refresh
+}
+
+function buildWorkspaceAuthUrl({ interactive }) {
+  const params = new URLSearchParams({
+    client_id: WEB_CLIENT_ID,
+    response_type: "token", // implicit flow — access_token in URL fragment
+    scope: WORKSPACE_SCOPES,
+    redirect_uri: chrome.identity.getRedirectURL(),
+    include_granted_scopes: "true",
+  });
+  if (!interactive) params.set("prompt", "none");
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+}
+
+function launchWorkspaceFlow(interactive) {
   return new Promise((resolve) => {
-    chrome.identity.getAuthToken({ interactive: true }, (token) => {
-      if (chrome.runtime.lastError) {
-        console.error("OAuth failed:", chrome.runtime.lastError.message);
-        resolve(null);
-        return;
+    chrome.identity.launchWebAuthFlow(
+      { url: buildWorkspaceAuthUrl({ interactive }), interactive },
+      (redirectUrl) => {
+        if (chrome.runtime.lastError || !redirectUrl) {
+          if (chrome.runtime.lastError) {
+            console.warn(
+              "[auth] workspace launchWebAuthFlow:",
+              chrome.runtime.lastError.message
+            );
+          }
+          resolve(null);
+          return;
+        }
+        const hash = (redirectUrl.split("#")[1] || "").replace(/^\//, "");
+        const qp = new URLSearchParams(hash);
+        const token = qp.get("access_token");
+        if (!token) {
+          resolve(null);
+          return;
+        }
+        const expiresIn = parseInt(qp.get("expires_in") || "3600", 10);
+        resolve({ token, expiresAt: Date.now() + expiresIn * 1000 });
       }
-      cachedAccessToken = token;
-      console.log("Google OAuth access token obtained");
-      resolve(token);
-    });
+    );
   });
 }
 
-async function clearGoogleAuthToken() {
-  if (cachedAccessToken) {
-    return new Promise((resolve) => {
-      chrome.identity.removeCachedAuthToken(
-        { token: cachedAccessToken },
-        () => {
-          cachedAccessToken = null;
-          console.log("Google OAuth access token cleared");
-          resolve();
-        }
-      );
-    });
+async function persistAccessToken(entry) {
+  accessTokenEntry = entry;
+  cachedAccessToken = entry.token; // keep legacy var in sync for any callers
+  await chrome.storage.local.set({ [ACCESS_STORAGE_KEY]: entry });
+}
+
+async function getGoogleAuthToken() {
+  if (isAccessFresh(accessTokenEntry)) return accessTokenEntry.token;
+
+  if (!accessTokenEntry) {
+    const stored = await chrome.storage.local.get(ACCESS_STORAGE_KEY);
+    if (stored[ACCESS_STORAGE_KEY] && isAccessFresh(stored[ACCESS_STORAGE_KEY])) {
+      accessTokenEntry = stored[ACCESS_STORAGE_KEY];
+      cachedAccessToken = accessTokenEntry.token;
+      return accessTokenEntry.token;
+    }
   }
+
+  // Silent refresh first — if the user already granted scopes, this returns
+  // a fresh token without showing any consent screen.
+  let fresh = await launchWorkspaceFlow(false);
+  if (fresh) {
+    await persistAccessToken(fresh);
+    return fresh.token;
+  }
+
+  // Interactive consent — user sees a Google consent screen for Workspace
+  // scopes the first time. Cached thereafter until revocation or expiry.
+  fresh = await launchWorkspaceFlow(true);
+  if (fresh) {
+    await persistAccessToken(fresh);
+    return fresh.token;
+  }
+
+  console.warn("[auth] Workspace access token unavailable — user cancelled or scopes unavailable");
+  return null;
+}
+
+async function clearGoogleAuthToken() {
+  accessTokenEntry = null;
+  cachedAccessToken = null;
+  await chrome.storage.local.remove(ACCESS_STORAGE_KEY);
+  console.log("Google OAuth access token cleared from cache");
 }
 
 // ── Authenticated fetch helper ─────────────────────────────────────────────
