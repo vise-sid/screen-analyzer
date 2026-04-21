@@ -58,6 +58,10 @@ class Session:
     # resume the loop with one tool_result user message.
     pending_browser_tools: list[dict[str, Any]] | None = None
     pending_direct_results: list[dict[str, Any]] | None = None
+    # Recent programmatic tool calls (name + args-hash) for loop detection.
+    # Trimmed to the last ~6 entries — long enough to spot 3-in-a-row thrash,
+    # short enough to forget legitimate repeats far apart.
+    recent_browser_calls: list[tuple[str, str]] = field(default_factory=list)
     # Per-turn buffer of chat() narrations the model emitted this turn.
     # Reset at the start of each turn, returned to the client.
     chats: list[str] = field(default_factory=list)

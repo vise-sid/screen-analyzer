@@ -44,8 +44,13 @@ from tools import ALL_TOOLS
 # round-trip through the extension via CDP/content-script.
 BACKEND_EXECUTED_TOOLS = {"workspace", "vision", "secret"}
 BROWSER_EXECUTED_TOOLS = {
-    "navigate", "click", "type", "key", "scroll", "observe",
-    "wait_for", "list_tabs", "switch_tab", "reauth_google",
+    "navigate", "observe",
+    "click", "double_click", "hover",
+    "type", "key", "key_combo", "scroll",
+    "back", "forward", "wait_for",
+    "list_tabs", "switch_tab",
+    "scrape", "popup", "dialog", "cookies", "fill_cells",
+    "reauth_google",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,7 +128,7 @@ SYSTEM_PROMPT = """You are Pixel Foxx, an autonomous browser-automation agent.
 
 2. **Predict, then verify only on contradiction.** Before acting, state in one short sentence what you expect to happen. After acting, re-observe ONLY if the actual result contradicted your prediction. Your primitives verify themselves: `type` returns `ok:false` if the value didn't land; `click` returns `url_changed`; trust these. Don't observe to "be sure". **Back-to-back observes are a hard failure** — if you observed last turn, do NOT observe again this turn unless an action since then plausibly changed the page shape (and even then: ONE observe, not two).
 
-3. **Snapshot beats screenshot.** Default `observe(include=["snapshot"])`. Add `"screenshot"` only when (a) you need vision — captcha, visual layout, color state — or (b) as terminal evidence in the report. Never as a verification crutch.
+3. **Snapshot beats screenshot.** Default `observe(include=["snapshot"])`. Add `"screenshot"` only when (a) you need vision — captcha, visual layout, color state — or (b) as terminal evidence in the report. Never as a verification crutch. **If you took a screenshot last turn, the next turn must either act on what the screenshot showed OR call `scrape(kind="page_html")` for structural detail — never re-screenshot to "look again." Re-screenshotting is how thrash starts.**
 
 4. **Skills are your prelude.** When you're about to do something for the first time in a session — touch the browser, write to a sheet, handle a captcha — `read_skill` for the relevant skill FIRST. Skills contain canonical recipes; copy them verbatim when they fit. Don't re-derive what a skill already solved.
 
@@ -187,6 +192,24 @@ def _redact_args_for_log(name: str, args: dict) -> dict:
             "submit": bool(args.get("submit")),
             "_text_redacted": True,
         }
+    if name == "fill_cells":
+        # Cell values can be PII or pasted secrets — show count only.
+        values = args.get("values") or []
+        return {
+            "value_count": len(values),
+            "direction": args.get("direction") or "right",
+            "has_start_locator": bool(args.get("start_locator")),
+            "_values_redacted": True,
+        }
+    if name == "cookies":
+        # Cookie values are session tokens. Action log shows action + count + url only.
+        cookies = args.get("cookies") or []
+        return {
+            "action": args.get("action"),
+            "url": args.get("url"),
+            "cookie_count": len(cookies),
+            "_cookies_redacted": True,
+        }
     return args
 
 
@@ -211,6 +234,51 @@ def _apply_done(session: Session, args: dict) -> None:
             s.status = "done"
             break
     session.active_step_id = next((s.id for s in session.plan if s.status == "pending"), None)
+
+
+# ── Loop-detection guard ─────────────────────────────────────────────────────
+# Catches the "agent calls the same tool with identical args 3+ times in a
+# row" pattern (e.g. scrape page_html × 3 in IRCTC trace). When tripped, we
+# return a synthetic error tool_result instead of dispatching — forces the
+# agent to re-strategize rather than thrash.
+
+LOOP_TRIP_THRESHOLD = 3   # 3rd identical call gets blocked
+LOOP_HISTORY_KEEP = 6     # how many recent calls to remember per session
+
+
+def _args_hash(args: dict) -> str:
+    try:
+        return json.dumps(args, sort_keys=True, default=str)
+    except Exception:
+        return repr(sorted(args.items()))
+
+
+def _check_loop_trip(session: Session, name: str, args: dict) -> str | None:
+    """Returns an error string if this call would be the 3rd identical in a
+    row; otherwise None. Caller must still record the call via _record_call.
+    """
+    h = _args_hash(args)
+    recent = session.recent_browser_calls or []
+    # Need at least 2 prior identical calls to trip on this 3rd one
+    if len(recent) >= LOOP_TRIP_THRESHOLD - 1:
+        last_two = recent[-(LOOP_TRIP_THRESHOLD - 1):]
+        if all(rc == (name, h) for rc in last_two):
+            return (
+                f"loop detected: {name}({args}) was already called "
+                f"{LOOP_TRIP_THRESHOLD - 1} times in a row with identical args. "
+                f"This 3rd call is blocked. The previous results did not change "
+                f"the page — calling it again will not help. Stop, observe(), "
+                f"and try a DIFFERENT approach (different selector, different "
+                f"tool, or report the blocker)."
+            )
+    return None
+
+
+def _record_call(session: Session, name: str, args: dict) -> None:
+    h = _args_hash(args)
+    recent = list(session.recent_browser_calls or [])
+    recent.append((name, h))
+    session.recent_browser_calls = recent[-LOOP_HISTORY_KEEP:]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -315,6 +383,27 @@ def drive_turn(
 
             if caller_type and caller_type.startswith("code_execution_"):
                 if name in BROWSER_EXECUTED_TOOLS:
+                    # Loop-detection guard: if this is the 3rd identical call
+                    # in a row, block it with an error result and force the
+                    # agent to re-strategize.
+                    loop_err = _check_loop_trip(session, name, args)
+                    if loop_err:
+                        session.actions.append({
+                            "kind": "programmatic",
+                            "name": name,
+                            "args": args,
+                            "blocked": True,
+                            "reason": "loop_detected",
+                        })
+                        tool_results.append(_ok_result(block.id, {
+                            "ok": False,
+                            "error": loop_err,
+                            "loop_detected": True,
+                        }))
+                        # DO NOT record this blocked call — otherwise we'd
+                        # extend the streak and trip again on a 4th attempt.
+                        continue
+                    _record_call(session, name, args)
                     # Queue for the extension. Cannot synthesize a result
                     # here — extension provides it via a follow-up step.
                     session.actions.append({
@@ -329,6 +418,23 @@ def drive_turn(
                     })
                     continue
                 if name in BACKEND_EXECUTED_TOOLS:
+                    # Same loop guard for backend tools (e.g. repeated vision()).
+                    loop_err = _check_loop_trip(session, name, args)
+                    if loop_err:
+                        session.actions.append({
+                            "kind": "programmatic",
+                            "name": name,
+                            "args": _redact_args_for_log(name, args),
+                            "blocked": True,
+                            "reason": "loop_detected",
+                        })
+                        tool_results.append(_ok_result(block.id, {
+                            "ok": False,
+                            "error": loop_err,
+                            "loop_detected": True,
+                        }))
+                        continue
+                    _record_call(session, name, args)
                     # Backend handles inline. Real impls for vision + secret;
                     # workspace still mocks until we wire access tokens.
                     session.actions.append({

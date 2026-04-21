@@ -104,6 +104,35 @@ CLICK = {
     "allowed_callers": ["code_execution_20260120"],
 }
 
+DOUBLE_CLICK = {
+    "name": "double_click",
+    "description": (
+        "Double-click an element. Same locator API as click(). Use for "
+        "selecting words, opening files in trees, expanding rows in tables."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": _LOCATOR_PROPS,
+        "required": ["by"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+HOVER = {
+    "name": "hover",
+    "description": (
+        "Hover over an element to reveal hidden menus / tooltips / dropdown "
+        "submenus. Same locator API as click(). Pair with a follow-up "
+        "observe(include=['snapshot']) to see what the hover revealed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": _LOCATOR_PROPS,
+        "required": ["by"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
 TYPE = {
     "name": "type",
     "description": (
@@ -135,6 +164,21 @@ KEY = {
     "allowed_callers": ["code_execution_20260120"],
 }
 
+KEY_COMBO = {
+    "name": "key_combo",
+    "description": (
+        "Press a key combination on the active element. Use Playwright syntax: "
+        "'Control+a' (select all), 'Control+c' / 'Control+v' (copy/paste), "
+        "'Shift+Tab', 'Meta+k', etc. Use Meta on macOS, Control on Windows/Linux."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"combo": {"type": "string", "description": "e.g. 'Control+a'"}},
+        "required": ["combo"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
 SCROLL = {
     "name": "scroll",
     "description": "Scroll the active tab vertically. Positive deltaY scrolls down.",
@@ -142,6 +186,56 @@ SCROLL = {
         "type": "object",
         "properties": {"deltaY": {"type": "integer"}},
         "required": ["deltaY"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+BACK = {
+    "name": "back",
+    "description": "Navigate back in the active tab's history. Returns ok:false if there's nothing to go back to.",
+    "input_schema": {"type": "object", "properties": {}},
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+FORWARD = {
+    "name": "forward",
+    "description": "Navigate forward in the active tab's history. Returns ok:false if there's nothing to go forward to.",
+    "input_schema": {"type": "object", "properties": {}},
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+FILL_CELLS = {
+    "name": "fill_cells",
+    "description": (
+        "Fill a sequence of cells in a canvas-rendered grid (Google Sheets, "
+        "Excel Online, Airtable) using keyboard navigation: type a value, "
+        "press Tab (right) or Enter (down), repeat. The DOM-locator tools "
+        "don't work on canvas grids, so this is the keyboard fallback. "
+        "If `start_locator` is provided, click it first to position the cursor."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "values": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Sequence of cell values to type.",
+            },
+            "direction": {
+                "type": "string",
+                "enum": ["right", "down"],
+                "default": "right",
+                "description": "Cursor movement between cells: right (Tab) or down (Enter).",
+            },
+            "start_locator": {
+                "type": "object",
+                "description": (
+                    "Optional locator for the cell to click into FIRST "
+                    "(same shape as click() args). Skip if cursor is already positioned."
+                ),
+            },
+        },
+        "required": ["values"],
     },
     "allowed_callers": ["code_execution_20260120"],
 }
@@ -209,6 +303,119 @@ WAIT_FOR = {
                 "default": 8000,
             },
         },
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+SCRAPE = {
+    "name": "scrape",
+    "description": (
+        "Extract structured data from the active tab. Dispatcher with `kind`:\n"
+        " - 'page_html' → full document.outerHTML (returns {html, length})\n"
+        " - 'table' → parse a <table> to {headers, rows, row_count}; pass `selector` "
+        "to pick a specific table (else first table)\n"
+        " - 'links' → all <a href> with text + context, capped at 200 (returns {links, count})\n"
+        " - 'metadata' → title, description, canonical, OG tags, language, favicon, "
+        "published_time (returns {metadata})\n"
+        " - 'network' → captured JSON XHR/Fetch responses since the last navigation, "
+        "newest-first, body-truncated; pass `max` to bound (default 20). "
+        "Use this to grab API payloads the page already fetched instead of re-scraping HTML."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": ["page_html", "table", "links", "metadata", "network"],
+            },
+            "selector": {
+                "type": "string",
+                "description": "CSS selector for kind='table' (optional; defaults to first table).",
+            },
+            "max": {
+                "type": "integer",
+                "description": "Max items for kind='network'. Default 20.",
+                "default": 20,
+            },
+        },
+        "required": ["kind"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+POPUP = {
+    "name": "popup",
+    "description": (
+        "Handle popups, captchas, and navigation hamburgers detected by observe(). "
+        "Dispatcher with `action`:\n"
+        " - 'dismiss' → close blocking popup. Tries close-button selectors → X-text "
+        "buttons → Escape key. Returns {ok, strategy}. **Only call when the popup is "
+        "blocking your goal (cookie banner, ad, app-promo). NEVER dismiss a popup that "
+        "contains input fields — that's usually the login/signup modal you want.**\n"
+        " - 'open_nav' → click the navigation hamburger from observe.nav_hamburger. "
+        "Use this BEFORE looking for LOGIN/REGISTER/Account on sites that hide their "
+        "nav behind a hamburger (IRCTC, many gov + SPA sites). Re-detects fresh, so "
+        "no stale-rect issues. Returns {ok, strategy: 'selector'|'coords'}.\n"
+        " - 'click_captcha' → for checkbox-style captchas (Cloudflare Turnstile, "
+        "reCAPTCHA v2, hCaptcha): finds the iframe, synthesizes a curved mouse "
+        "approach + click. Only when observe.captcha surfaced one of these. "
+        "Image/text captchas need vision() instead."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["dismiss", "open_nav", "click_captcha"]},
+        },
+        "required": ["action"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+DIALOG = {
+    "name": "dialog",
+    "description": (
+        "Manually handle the next native JS dialog (alert/confirm/prompt/beforeunload) "
+        "that fires within 5s. Backend auto-handles dialogs as they appear "
+        "(accepts beforeunload+alert, dismisses confirm+prompt) — call this ONLY "
+        "when you need to override that default for a specific upcoming action.\n"
+        "Pattern: arm dialog() in one block, then trigger the action that fires it.\n"
+        "action='accept' optionally takes `text` for prompt() responses."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["accept", "dismiss"]},
+            "text": {"type": "string", "description": "Optional response for prompt() dialogs."},
+        },
+        "required": ["action"],
+    },
+    "allowed_callers": ["code_execution_20260120"],
+}
+
+COOKIES = {
+    "name": "cookies",
+    "description": (
+        "Read or write browser cookies for an origin. Dispatcher with `action`:\n"
+        " - 'extract' → return all cookies for `url` (default: current page URL). "
+        "Returns {cookies: [{name, value, domain, path, secure, httpOnly, sameSite, expirationDate}]}\n"
+        " - 'inject' → write the given cookies array. Each cookie needs name + value + domain + path "
+        "(or url). Returns {injected, errors}.\n"
+        "Use cases: snapshot a logged-in session before risky navigation; warm up a tab from "
+        "an exported session; dedupe sign-in flow across runs. Cookie values are sensitive — "
+        "the backend redacts them from action logs."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["extract", "inject"]},
+            "url": {"type": "string", "description": "Origin URL for extract (default: current page)."},
+            "cookies": {
+                "type": "array",
+                "description": "For action='inject': cookie objects with name/value/domain/path/secure/httpOnly/sameSite.",
+                "items": {"type": "object"},
+            },
+        },
+        "required": ["action"],
     },
     "allowed_callers": ["code_execution_20260120"],
 }
@@ -410,8 +617,11 @@ REPORT = {
 # ── The full toolset the agent sees ───────────────────────────────────────
 
 PROGRAMMATIC_TOOLS = [
-    OBSERVE, NAVIGATE, CLICK, TYPE, KEY, SCROLL, WAIT_FOR,
+    OBSERVE, NAVIGATE,
+    CLICK, DOUBLE_CLICK, HOVER, TYPE, KEY, KEY_COMBO, SCROLL,
+    BACK, FORWARD, WAIT_FOR,
     LIST_TABS, SWITCH_TAB,
+    SCRAPE, POPUP, DIALOG, COOKIES, FILL_CELLS,
     WORKSPACE, REAUTH_GOOGLE, VISION, SECRET,
 ]
 
